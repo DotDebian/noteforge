@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useLocale } from '~/composables/useLocale'
 
 const { isFr, t, toggle } = useLocale()
@@ -7,6 +7,17 @@ const { isFr, t, toggle } = useLocale()
 // The flag shown is the language we'd switch TO when clicked.
 const nextLabel = computed(() => (isFr.value ? t('lang.en') : t('lang.fr')))
 const title = computed(() => `${t('lang.switch')} — ${nextLabel.value}`)
+
+// `useLocale` reads from localStorage + navigator.language on the client,
+// so SSR (always 'en' → French-flag SVG with 4 <rect>s) can mismatch the
+// hydration target (e.g. 'fr' → Union-Jack SVG with several <path>s and
+// only 2 <rect>s). The differing child counts crash Vue's hydration on
+// `nextSibling`. Gate the swap on a mount flag so SSR + first client
+// patch always agree on the French-flag tree, then onMounted updates to
+// the real locale as a normal reactive change.
+const mounted = ref(false)
+onMounted(() => { mounted.value = true })
+const showFr = computed(() => mounted.value && isFr.value)
 </script>
 
 <template>
@@ -19,7 +30,7 @@ const title = computed(() => `${t('lang.switch')} — ${nextLabel.value}`)
   >
     <!-- Show the flag for the OTHER locale: clicking it switches to that one. -->
     <svg
-      v-if="!isFr"
+      v-if="!showFr"
       viewBox="0 0 18 12"
       width="18"
       height="12"

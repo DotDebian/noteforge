@@ -1,20 +1,32 @@
 <script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
 import { useTheme } from '~/composables/useTheme'
 import { useLocale } from '~/composables/useLocale'
 
 const { isDark, toggle } = useTheme()
 const { t } = useLocale()
+
+// `useDark` reads from localStorage on the client and defaults to system on
+// the server, so the SSR pass renders the light icon (single <path>) while
+// hydration may want the dark icon (<circle> + <path>) — Vue's hydration
+// walker then trips on the mismatched child count with a "Cannot read
+// properties of null (reading 'nextSibling')". Gate the swap on a mounted
+// flag so SSR and the first client patch agree on the moon, then onMounted
+// flips to the real value as a normal reactive update.
+const mounted = ref(false)
+onMounted(() => { mounted.value = true })
+const showDark = computed(() => mounted.value && isDark.value)
 </script>
 
 <template>
   <button
     type="button"
     class="theme-toggle"
-    :title="isDark ? t('theme.toLight') : t('theme.toDark')"
-    :aria-pressed="isDark"
+    :title="showDark ? t('theme.toLight') : t('theme.toDark')"
+    :aria-pressed="showDark"
     @click="toggle()"
   >
-    <svg v-if="!isDark" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+    <svg v-if="!showDark" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
       <!-- crescent moon -->
       <path
         d="M11 2a6 6 0 1 0 3 8 5 5 0 0 1-3-8z"
