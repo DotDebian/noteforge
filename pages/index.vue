@@ -1,15 +1,27 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useWorkspacesStore } from '~/stores/workspaces'
 import { useLocale } from '~/composables/useLocale'
 
 // We pick the layout dynamically based on session: logged-out visitors get
-// the marketing landing (`landing` layout), logged-in users keep the app
-// shell (`default` layout) for the workspace bootstrap.
-definePageMeta({ layout: false })
+// the marketing landing, logged-in users get the app shell for the
+// workspace bootstrap. We do this with `setPageLayout` instead of an
+// inline `<NuxtLayout :name>` wrapper inside this page's template —
+// nesting a `<NuxtLayout>` in a page with `layout: false` desynchronises
+// the outer `<NuxtLayout>` in app.vue, so navigating away (e.g. clicking
+// "Se connecter" → /login which declares its own `auth` layout) updates
+// the URL but never re-renders the page tree until a manual reload.
+definePageMeta({ layout: 'landing' })
 
 const { loggedIn } = useUserSession()
 const { t } = useLocale()
+
+// Match the layout to the initial session state, then keep them in sync
+// if the user signs in / out without a hard reload.
+setPageLayout(loggedIn.value ? 'default' : 'landing')
+watch(() => loggedIn.value, (v) => {
+  setPageLayout(v ? 'default' : 'landing')
+})
 
 useHead(() => ({
   title: loggedIn.value
@@ -55,39 +67,37 @@ async function onCreate() {
 </script>
 
 <template>
-  <NuxtLayout :name="loggedIn ? 'default' : 'landing'">
-    <!-- Logged-out: marketing landing -->
-    <LandingPage v-if="!loggedIn" />
+  <!-- Logged-out: marketing landing -->
+  <LandingPage v-if="!loggedIn" />
 
-    <!-- Logged-in: workspace bootstrap (redirects when one exists,
-         otherwise shows the create-first-workspace form). -->
-    <div v-else class="welcome">
-      <div v-if="checking" class="loading">
-        <span class="dot" /> <span class="dot" /> <span class="dot" />
-      </div>
-
-      <div v-else class="cta">
-        <p class="eyebrow">{{ t('workspace.empty.eyebrow') }}</p>
-        <h1 class="title">{{ t('workspace.empty.title') }}</h1>
-        <p class="lede">
-          {{ t('workspace.empty.lede') }}
-        </p>
-
-        <form class="form" @submit.prevent="onCreate">
-          <label class="field">
-            <span class="label">{{ t('workspace.empty.label') }}</span>
-            <input v-model="newName" type="text" required autofocus :placeholder="t('workspace.empty.placeholder')" />
-          </label>
-          <button type="submit" class="primary" :disabled="creating || !newName.trim()">
-            <span v-if="!creating">{{ t('workspace.new.create') }}</span>
-            <span v-else>{{ t('workspace.new.creating') }}</span>
-          </button>
-        </form>
-
-        <p v-if="error" class="error">{{ error }}</p>
-      </div>
+  <!-- Logged-in: workspace bootstrap (redirects when one exists,
+       otherwise shows the create-first-workspace form). -->
+  <div v-else class="welcome">
+    <div v-if="checking" class="loading">
+      <span class="dot" /> <span class="dot" /> <span class="dot" />
     </div>
-  </NuxtLayout>
+
+    <div v-else class="cta">
+      <p class="eyebrow">{{ t('workspace.empty.eyebrow') }}</p>
+      <h1 class="title">{{ t('workspace.empty.title') }}</h1>
+      <p class="lede">
+        {{ t('workspace.empty.lede') }}
+      </p>
+
+      <form class="form" @submit.prevent="onCreate">
+        <label class="field">
+          <span class="label">{{ t('workspace.empty.label') }}</span>
+          <input v-model="newName" type="text" required autofocus :placeholder="t('workspace.empty.placeholder')" />
+        </label>
+        <button type="submit" class="primary" :disabled="creating || !newName.trim()">
+          <span v-if="!creating">{{ t('workspace.new.create') }}</span>
+          <span v-else>{{ t('workspace.new.creating') }}</span>
+        </button>
+      </form>
+
+      <p v-if="error" class="error">{{ error }}</p>
+    </div>
+  </div>
 </template>
 
 <style scoped>
