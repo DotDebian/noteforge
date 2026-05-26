@@ -1,0 +1,1 @@
+ALTER TABLE `doc_analyses` ADD `summary_embedding` blob;

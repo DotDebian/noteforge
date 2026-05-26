@@ -1,0 +1,139 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1779311090805,
+      "tag": "0000_bitter_energizer",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1779399999999,
+      "tag": "0001_add_deleted_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1779488888888,
+      "tag": "0002_favorites",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1779577777777,
+      "tag": "0003_embedding_blob",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1779666666666,
+      "tag": "0004_doc_chunks_vec",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1779755555555,
+      "tag": "0005_doc_chunks_section_path",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1779844444444,
+      "tag": "0006_doc_analyses_md_length",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1779933333333,
+      "tag": "0007_doc_links",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1780022222222,
+      "tag": "0008_attachments",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1780111111111,
+      "tag": "0009_chat_session_scope_doc",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1780200000000,
+      "tag": "0010_share_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1780288888888,
+      "tag": "0011_document_versions",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1779365664538,
+      "tag": "0012_yellow_talos",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1779373814837,
+      "tag": "0013_little_supernaut",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1779374068068,
+      "tag": "0014_certain_clint_barton",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1780500000000,
+      "tag": "0015_green_thor_girl",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1780600000000,
+      "tag": "0016_doc_chunks_fts",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1780700000000,
+      "tag": "0017_normal_zuras",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1780800000000,
+      "tag": "0018_hot_vampiro",
+      "breakpoints": true
+    }
+  ]
+}

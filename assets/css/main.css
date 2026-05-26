@@ -1,0 +1,607 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* -------------------------------------------------------------------------- */
+/*  Theme tokens                                                              */
+/*                                                                            */
+/*  Light is the default. Adding `.dark` to <html> flips the variables.        */
+/*  Tailwind's `dark:` modifier is also wired (darkMode: 'class').            */
+/* -------------------------------------------------------------------------- */
+
+:root {
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+html,
+body,
+#__nuxt {
+  height: 100%;
+}
+
+body {
+  @apply bg-ink-50 text-ink-900 antialiased;
+  font-feature-settings: 'cv11', 'ss01';
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+html.dark body {
+  @apply bg-ink-950 text-ink-100;
+}
+
+::selection {
+  @apply bg-accent-200 text-ink-900;
+}
+
+html.dark ::selection {
+  @apply bg-accent-700 text-ink-50;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Reusable utility: small mono uppercase labels — defined as a Tailwind     */
+/*  plugin in tailwind.config.ts so `@apply label-mono` works inside Vue      */
+/*  `<style scoped>` blocks (which would otherwise be processed in isolation  */
+/*  and not see globally-defined classes here).                               */
+/* -------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------- */
+/*  Themed scrollbar — thin, ink-tinted, stable gutter for symmetry           */
+/*                                                                            */
+/*  Apply with `class="editor-scroll"` on any overflow container.             */
+/* -------------------------------------------------------------------------- */
+
+.editor-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: theme('colors.ink.300' / 70%) transparent;
+  scrollbar-gutter: stable;
+}
+.editor-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+.editor-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.editor-scroll::-webkit-scrollbar-thumb {
+  background-color: theme('colors.ink.300' / 60%);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  transition: background-color 140ms ease;
+}
+.editor-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: theme('colors.ink.500' / 80%);
+}
+.editor-scroll::-webkit-scrollbar-thumb:active {
+  background-color: theme('colors.ink.600');
+}
+.editor-scroll::-webkit-scrollbar-corner { background: transparent; }
+
+html.dark .editor-scroll {
+  scrollbar-color: theme('colors.ink.700' / 80%) transparent;
+}
+html.dark .editor-scroll::-webkit-scrollbar-thumb {
+  background-color: theme('colors.ink.700' / 70%);
+}
+html.dark .editor-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: theme('colors.ink.500' / 80%);
+}
+html.dark .editor-scroll::-webkit-scrollbar-thumb:active {
+  background-color: theme('colors.ink.400');
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Tiptap editor base                                                        */
+/* -------------------------------------------------------------------------- */
+
+.ProseMirror {
+  @apply outline-none min-h-[60vh];
+}
+.ProseMirror p.is-editor-empty:first-child::before {
+  @apply text-ink-400;
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+html.dark .ProseMirror p.is-editor-empty:first-child::before {
+  @apply text-ink-500;
+}
+
+/* --------------------------------------------------------------------------
+   Slash-hint extension for empty docs (Sprint 5 / I10).
+
+   Tiptap's Placeholder extension applies the placeholder text via
+   `content: attr(data-placeholder)`. To extend with a second hint line
+   (cue for the slash menu + bold shortcut), we use a sibling ::after on
+   the empty first paragraph. The whole construct disappears as soon as
+   the user types because Tiptap drops `.is-editor-empty` on first input.
+   We keep the existing "Start writing…" placeholder text in the editor
+   config; this rule layers the keyboard hints underneath it.
+
+   Selector is intentionally scoped to `.ProseMirror p.is-editor-empty:first-child`
+   to match how Placeholder already labels the empty first node.
+   -------------------------------------------------------------------------- */
+.ProseMirror p.is-editor-empty:first-child::after {
+  content: 'Type / for commands · Ctrl+B for bold';
+  display: block;
+  margin-top: 0.5rem;
+  font-size: 0.8125rem;
+  letter-spacing: 0.01em;
+  color: theme('colors.ink.400');
+  pointer-events: none;
+}
+html.dark .ProseMirror p.is-editor-empty:first-child::after {
+  color: theme('colors.ink.600');
+}
+
+/* --------------------------------------------------------------------------
+   Focus mode (Sprint 5 / I10).
+
+   Hides the sidebar, document rail and chat FAB so the writer can
+   concentrate on the editor canvas. Toggled with Ctrl+. / Cmd+. by the
+   global keydown handler in layouts/default.vue. The sidebar slides out to
+   the left AND collapses its flex slot to zero width so the main column
+   reflows to fill the screen (a plain translateX would leave the space
+   reserved). The chat drawer itself stays reachable by its own toggle —
+   only the floating FAB is hidden, since unhiding it on demand is what the
+   command palette is for.
+   -------------------------------------------------------------------------- */
+.focus-mode .sidebar {
+  width: 0 !important;
+  min-width: 0;
+  border-right-width: 0;
+  transform: translateX(-100%);
+  overflow: hidden;
+  transition: width 200ms ease, transform 200ms ease;
+  pointer-events: none;
+}
+.focus-mode .doc-rail {
+  display: none;
+}
+.focus-mode .chat-fab {
+  display: none;
+}
+
+/* --------------------------------------------------------------------------
+   Mobile layout (Sprint 5 / F10).
+
+   Below md (< 768px) the app shell becomes a column: topbar on top, main
+   below. The sidebar is removed from the flex flow and rendered as a fixed
+   slide-over drawer toggled by `useMobileSidebar()`. Above md, all of these
+   rules unset themselves and the original desktop layout is restored.
+
+   The shell sets `flex-direction: column` so the topbar sits above the main
+   column. The sidebar is `position: fixed` with `transform: translateX(-100%)`
+   off-screen by default; adding `.mobile-sidebar-open` on the shell slides
+   it in.
+
+   iOS momentum scroll + pull-to-refresh containment.
+   -------------------------------------------------------------------------- */
+
+body {
+  /* Prevent pull-to-refresh / over-scroll from leaking past the app shell. */
+  overscroll-behavior: contain;
+}
+
+@media (max-width: 767px) {
+  .app-shell {
+    flex-direction: column;
+  }
+  .app-main {
+    /* Topbar (h-12 = 3rem) eats fixed vertical space; let the main column
+       fill the rest. `min-h-0` already on .app-main keeps overflow scroll
+       contained. */
+    width: 100%;
+  }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    height: 100%;
+    width: min(85vw, 320px) !important;
+    z-index: 50;
+    transform: translateX(-100%);
+    transition: transform 220ms cubic-bezier(0.2, 0.7, 0.2, 1);
+    /* Sidebar drawer doesn't need the right border above the drawer edge. */
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.12);
+  }
+  html.dark .sidebar {
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.4);
+  }
+  .mobile-sidebar-open .sidebar {
+    transform: translateX(0);
+  }
+  /* The desktop "collapse" toggle is meaningless on mobile — when the drawer
+     is open the user wants the full sidebar contents. */
+  .mobile-sidebar-open .sidebar.sidebar--collapsed {
+    width: min(85vw, 320px) !important;
+  }
+  /* Editor padding shrinks on small screens — the doc page uses
+     px-10/lg:px-14 which crowds out the writing area at 375px. */
+  .doc-area {
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+    padding-top: 1rem !important;
+  }
+}
+
+/* iOS momentum scroll on the main scroll containers. */
+.sidebar,
+.tree,
+.editor-scroll,
+.mobile-sheet {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Safe-area bottom padding for the editor canvas so the last line clears
+   the iOS home indicator. The scroll container itself is `.editor-scroll`
+   (the writing column) — CLAUDE.md is explicit that the scroll must stay
+   on EditorContent and not be hoisted to the outer wrapper. */
+.editor-scroll {
+  padding-bottom: calc(2rem + env(safe-area-inset-bottom, 0));
+}
+
+/* --------------------------------------------------------------------------
+   Mobile bottom sheet (Sprint 5 / F10).
+
+   Used by DocInsightsSheet and the chat full-screen overlay on small viewports.
+   The `.mobile-sheet` is a generic shell; the chat overlay uses its own
+   inline `inset-0` rules at the component level.
+   -------------------------------------------------------------------------- */
+.mobile-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  max-height: 85vh;
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
+  background: theme('colors.ink.50');
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+html.dark .mobile-sheet {
+  background: theme('colors.ink.900');
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
+}
+.mobile-sheet-handle {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 4px;
+  flex-shrink: 0;
+}
+.mobile-sheet-handle::before {
+  content: '';
+  display: block;
+  width: 38px;
+  height: 4px;
+  border-radius: 2px;
+  background: theme('colors.ink.300');
+}
+html.dark .mobile-sheet-handle::before {
+  background: theme('colors.ink.700');
+}
+.mobile-sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px 8px;
+  flex-shrink: 0;
+}
+.mobile-sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Code block — editor (.code-block, set by CodeBlockLowlight) + syntax     */
+/*  highlighting tokens (hljs-* classes injected by lowlight).               */
+/*                                                                            */
+/*  The chat drawer (.msg-md pre) and public share page (.doc-body pre) set  */
+/*  their own pre styling; the token rules below apply globally based on the */
+/*  hljs-* class names, so they show up everywhere lowlight emits spans.     */
+/*  Chat's <pre> is dark in both modes, so it overrides the token variables  */
+/*  to the dark palette regardless of the html.dark switch.                  */
+/* -------------------------------------------------------------------------- */
+
+.ProseMirror .code-block {
+  @apply font-mono text-[0.85em] my-4 px-3.5 py-3 rounded overflow-x-auto;
+  background: theme('colors.ink.100');
+  border: 1px solid theme('colors.ink.200');
+}
+html.dark .ProseMirror .code-block {
+  background: theme('colors.ink.900');
+  border-color: theme('colors.ink.800');
+}
+.ProseMirror .code-block code {
+  @apply font-mono p-0 text-inherit;
+  background: transparent;
+}
+
+/* Token palette — driven through CSS variables so chat's always-dark <pre>
+   can re-bind them locally without duplicating every rule. */
+:root {
+  --hl-keyword: theme('colors.accent.700');
+  --hl-string:  theme('colors.emerald.700');
+  --hl-number:  theme('colors.amber.700');
+  --hl-title:   theme('colors.sky.700');
+  --hl-variable:theme('colors.rose.700');
+  --hl-regexp:  theme('colors.fuchsia.700');
+  --hl-comment: theme('colors.ink.500');
+}
+html.dark {
+  --hl-keyword: theme('colors.accent.300');
+  --hl-string:  theme('colors.emerald.300');
+  --hl-number:  theme('colors.amber.300');
+  --hl-title:   theme('colors.sky.300');
+  --hl-variable:theme('colors.rose.300');
+  --hl-regexp:  theme('colors.fuchsia.300');
+  --hl-comment: theme('colors.ink.400');
+}
+/* Chat's <pre> is dark even in light mode — pin the dark palette locally. */
+.msg-md pre {
+  --hl-keyword: theme('colors.accent.300');
+  --hl-string:  theme('colors.emerald.300');
+  --hl-number:  theme('colors.amber.300');
+  --hl-title:   theme('colors.sky.300');
+  --hl-variable:theme('colors.rose.300');
+  --hl-regexp:  theme('colors.fuchsia.300');
+  --hl-comment: theme('colors.ink.400');
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-link,
+.hljs-built_in,
+.hljs-doctag { color: var(--hl-keyword); }
+
+.hljs-string,
+.hljs-attr,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition { color: var(--hl-string); }
+
+.hljs-number,
+.hljs-meta,
+.hljs-type { color: var(--hl-number); }
+
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.function_,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class { color: var(--hl-title); }
+
+.hljs-comment,
+.hljs-quote,
+.hljs-deletion { color: var(--hl-comment); font-style: italic; }
+
+.hljs-variable,
+.hljs-template-variable,
+.hljs-tag,
+.hljs-attribute,
+.hljs-params { color: var(--hl-variable); }
+
+.hljs-regexp { color: var(--hl-regexp); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+
+/* -------------------------------------------------------------------- */
+/*  KaTeX math                                                          */
+/*                                                                       */
+/*  KaTeX ships its own stylesheet (loaded from jsdelivr in nuxt.config) */
+/*  for the formula glyphs themselves. The rules below only handle our  */
+/*  surrounding chrome: vertical rhythm for block math and a subtle     */
+/*  emphasis tint for inline math.                                      */
+/* -------------------------------------------------------------------- */
+.ProseMirror .math-block,
+.ProseMirror .math-block-nv {
+  /* KaTeX's `.katex-display` already adds a centred block; we just want
+     a touch more breathing room so equations don't crowd surrounding
+     prose. */
+  margin-top: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+.ProseMirror .math-block .katex-display,
+.ProseMirror .math-block-nv .katex-display {
+  display: flex;
+  justify-content: center;
+  margin: 0;
+}
+.ProseMirror .math-inline .katex,
+.ProseMirror .math-inline-nv .katex {
+  /* Inline math is bigger than surrounding 0.9em code; bring it back in
+     line with the prose font size. */
+  font-size: 1.05em;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Footnote target flash — used when the user clicks a [^N] superscript      */
+/* -------------------------------------------------------------------------- */
+
+.footnote-target-flash {
+  animation: footnote-flash 1.4s ease-out;
+  background-color: theme('colors.accent.100');
+  transition: background-color 0.6s ease;
+}
+html.dark .footnote-target-flash {
+  background-color: theme('colors.accent.900' / 35%);
+}
+@keyframes footnote-flash {
+  0%   { background-color: theme('colors.accent.200'); }
+  100% { background-color: transparent; }
+}
+
+/* Footnote list at the bottom of a doc — render as a numbered list whose
+   items match the original references at the top. */
+.ProseMirror .footnotes,
+.ProseMirror section.footnotes {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid theme('colors.ink.200');
+  font-size: 0.875em;
+}
+html.dark .ProseMirror .footnotes,
+html.dark .ProseMirror section.footnotes {
+  border-top-color: theme('colors.ink.800');
+}
+.ProseMirror .footnotes ol,
+.ProseMirror ol[data-footnotes-list] {
+  list-style: decimal;
+  padding-left: 1.5rem;
+  margin: 0;
+}
+.ProseMirror .footnote-item,
+.ProseMirror li[data-footnote-item] {
+  margin: 0.25rem 0;
+  color: theme('colors.ink.700');
+}
+html.dark .ProseMirror .footnote-item,
+html.dark .ProseMirror li[data-footnote-item] {
+  color: theme('colors.ink.300');
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Editable tables — ensure borders are visible regardless of scoped CSS      */
+/*  (this duplicates the scoped rules in DocumentEditor.vue, but Tailwind     */
+/*  `@apply border` inside scoped `:deep()` sometimes loses against table     */
+/*  resets; a global rule makes the borders bulletproof).                    */
+/* -------------------------------------------------------------------------- */
+
+.ProseMirror table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1.25rem 0;
+  table-layout: fixed;
+}
+.ProseMirror table td,
+.ProseMirror table th {
+  border: 1px solid theme('colors.ink.300');
+  padding: 0.5rem 0.75rem;
+  vertical-align: top;
+  font-size: 0.95em;
+  min-width: 4rem;
+  position: relative;
+}
+.ProseMirror table th {
+  background-color: theme('colors.ink.100');
+  font-weight: 600;
+  color: theme('colors.ink.900');
+}
+html.dark .ProseMirror table td,
+html.dark .ProseMirror table th {
+  border-color: theme('colors.ink.700');
+}
+html.dark .ProseMirror table th {
+  background-color: theme('colors.ink.800');
+  color: theme('colors.ink.50');
+}
+.ProseMirror table .selectedCell {
+  background-color: theme('colors.accent.50');
+}
+html.dark .ProseMirror table .selectedCell {
+  background-color: theme('colors.accent.900' / 35%);
+}
+.ProseMirror table .column-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -2px;
+  width: 4px;
+  background-color: theme('colors.accent.500');
+  pointer-events: none;
+}
+/* Tiptap wraps editable tables in `<div class="tableWrapper">` — keep it
+   from flexing weirdly inside narrow layouts. */
+.ProseMirror .tableWrapper {
+  overflow-x: auto;
+  margin: 1.25rem 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Collapsible (`<details>` / `<summary>`)                                   */
+/*                                                                            */
+/*  Inside the editor the visual presentation lives in CollapsibleNodeView's  */
+/*  scoped styles. The OUTSIDE-the-editor render (HTML export, public share   */
+/*  page) hits this fallback — it relies on the native browser toggle.        */
+/* -------------------------------------------------------------------------- */
+
+details.collapsible {
+  margin: 1.25rem 0;
+  padding: 0.5rem 0.75rem 0.5rem 0.5rem;
+  border: 1px solid theme('colors.ink.200');
+  border-radius: 0.5rem;
+  background-color: theme('colors.ink.50' / 60%);
+}
+html.dark details.collapsible {
+  border-color: theme('colors.ink.800');
+  background-color: theme('colors.ink.900' / 60%);
+}
+details.collapsible > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-family: theme('fontFamily.serif');
+  color: theme('colors.ink.900');
+  list-style: none;
+  padding: 0.25rem 0.25rem;
+  outline: none;
+  display: list-item;
+}
+html.dark details.collapsible > summary {
+  color: theme('colors.ink.50');
+}
+details.collapsible > summary::-webkit-details-marker {
+  display: none;
+}
+details.collapsible > summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 1em;
+  margin-right: 0.35em;
+  color: theme('colors.ink.400');
+  transition: transform 0.15s ease;
+}
+details.collapsible[open] > summary::before {
+  transform: rotate(90deg);
+}
+/* Inside the editor the chevron is a real button (NodeView), so suppress the
+   pseudo-element fallback there to avoid double chevrons. */
+.ProseMirror details.collapsible > summary::before {
+  content: none;
+}
+details.collapsible > .collapsible-content,
+details.collapsible > div[data-collapsible-content] {
+  padding: 0.25rem 0.25rem 0.25rem 1.5rem;
+  margin-top: 0.5rem;
+  border-top: 1px dashed theme('colors.ink.200');
+}
+html.dark details.collapsible > .collapsible-content,
+html.dark details.collapsible > div[data-collapsible-content] {
+  border-top-color: theme('colors.ink.800');
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Wiki-link mark — Ctrl/Cmd-click navigates                                 */
+/* -------------------------------------------------------------------------- */
+
+.ProseMirror a.editor-link {
+  cursor: text;
+}
+.ProseMirror a.editor-link[href^="/w/"] {
+  cursor: pointer;
+}
