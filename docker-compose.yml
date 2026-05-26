@@ -5,7 +5,7 @@ services:
     container_name: noteforge
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3030:3000"
     environment:
       # Required — fail fast if either is missing (Nuxt/auth-utils throws on
       # an empty NUXT_SESSION_PASSWORD; Mistral calls 401 without the key).
