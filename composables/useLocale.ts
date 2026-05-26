@@ -303,7 +303,7 @@ const en: Messages = {
   'auth.register.altLink': 'Sign in',
   'auth.register.errorGeneric': 'Could not create account.',
   'auth.register.inviteCode': 'Invite code',
-  'auth.register.inviteCodePlaceholder': 'NLJELA',
+  'auth.register.inviteCodePlaceholder': 'Ask whoever invited you',
   'auth.register.errorInviteCode': 'Invalid invite code.',
   'auth.layout.footer': 'An editor for slow thoughts.',
 
@@ -926,7 +926,7 @@ const fr: Messages = {
   'auth.register.altLink': 'Se connecter',
   'auth.register.errorGeneric': 'Impossible de créer le compte.',
   'auth.register.inviteCode': 'Code d’invitation',
-  'auth.register.inviteCodePlaceholder': 'NLJELA',
+  'auth.register.inviteCodePlaceholder': 'Demande-le à qui t’a invité',
   'auth.register.errorInviteCode': 'Code d’invitation invalide.',
   'auth.layout.footer': 'Un éditeur pour les pensées lentes.',
 
