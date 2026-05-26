@@ -12,6 +12,7 @@ const { register } = useAuth()
 const email = ref('')
 const password = ref('')
 const displayName = ref('')
+const inviteCode = ref('')
 const pending = ref(false)
 const error = ref<string | null>(null)
 
@@ -28,14 +29,20 @@ async function onSubmit() {
       email: email.value.trim(),
       password: password.value,
       displayName: displayName.value.trim() || undefined,
+      inviteCode: inviteCode.value.trim(),
     })
     // Hold here on the recovery-key screen; navigation happens once the
     // user has explicitly acknowledged they saved it. The key never
     // leaves this page — refreshing destroys it.
     recoveryKey.value = res.recoveryKey
   } catch (e: unknown) {
-    const data = (e as { data?: { message?: string }, message?: string }).data
-    error.value = data?.message ?? (e as Error).message ?? t('auth.register.errorGeneric')
+    const err = e as { data?: { statusMessage?: string, message?: string }, statusMessage?: string, message?: string }
+    const code = err.data?.statusMessage ?? err.statusMessage
+    if (code === 'invalid_invite_code') {
+      error.value = t('auth.register.errorInviteCode')
+    } else {
+      error.value = err.data?.message ?? err.message ?? t('auth.register.errorGeneric')
+    }
   } finally {
     pending.value = false
   }
@@ -107,6 +114,19 @@ async function continueAfterRecovery() {
     <h1 class="title">{{ t('auth.register.title') }}</h1>
 
     <div class="fields">
+      <label class="field">
+        <span class="label">{{ t('auth.register.inviteCode') }}</span>
+        <input
+          v-model="inviteCode"
+          type="text"
+          autocomplete="off"
+          autocapitalize="characters"
+          spellcheck="false"
+          required
+          :placeholder="t('auth.register.inviteCodePlaceholder')"
+        />
+      </label>
+
       <label class="field">
         <span class="label">{{ t('auth.register.displayName') }} <span class="opt">{{ t('auth.register.optional') }}</span></span>
         <input

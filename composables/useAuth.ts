@@ -18,6 +18,7 @@ interface AuthLoginBody {
 
 interface AuthRegisterBody extends AuthLoginBody {
   displayName?: string
+  inviteCode: string
 }
 
 interface LoginResponse {

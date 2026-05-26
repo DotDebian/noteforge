@@ -22,6 +22,7 @@ const Body = z.object({
   email: z.string().email().max(255),
   password: z.string().min(8).max(200),
   displayName: z.string().min(1).max(120).optional(),
+  inviteCode: z.string().min(1).max(64),
 })
 
 const IP_LIMIT = 10
@@ -41,6 +42,11 @@ function refuse(event: H3Event, retryAfterMs: number): never {
 export default defineEventHandler(async (event) => {
   const input = await readValidatedBody(event, Body.parse)
   const email = input.email.trim().toLowerCase()
+
+  const expectedInvite = (useRuntimeConfig(event).inviteCode as string) || 'NLJELA'
+  if (input.inviteCode.trim().toUpperCase() !== expectedInvite.trim().toUpperCase()) {
+    throw createError({ statusCode: 403, statusMessage: 'invalid_invite_code' })
+  }
 
   const ip = getClientIp(event)
   const ipKey = `auth:register:ip:${ip}`

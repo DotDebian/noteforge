@@ -20,6 +20,7 @@ export default defineNuxtConfig({
     mistralChatModel: process.env.MISTRAL_CHAT_MODEL ?? 'mistral-large-latest',
     mistralEmbedModel: process.env.MISTRAL_EMBED_MODEL ?? 'mistral-embed',
     databaseUrl: process.env.DATABASE_URL ?? 'data/noteforge.db',
+    inviteCode: process.env.INVITE_CODE ?? 'NLJELA',
     session: {
       maxAge: 60 * 60 * 24 * 30,
     },
@@ -41,6 +42,7 @@ export default defineNuxtConfig({
         { name: 'viewport', content: 'width=device-width, initial-scale=1, viewport-fit=cover' },
       ],
       link: [
+        { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' },
         { rel: 'preconnect', href: 'https://fonts.googleapis.com' },
         { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' },
         {

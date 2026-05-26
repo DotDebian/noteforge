@@ -302,6 +302,9 @@ const en: Messages = {
   'auth.register.altQuestion': 'Already have one?',
   'auth.register.altLink': 'Sign in',
   'auth.register.errorGeneric': 'Could not create account.',
+  'auth.register.inviteCode': 'Invite code',
+  'auth.register.inviteCodePlaceholder': 'NLJELA',
+  'auth.register.errorInviteCode': 'Invalid invite code.',
   'auth.layout.footer': 'An editor for slow thoughts.',
 
   /* ----------------------------- Dialogs ----------------------------- */
@@ -922,6 +925,9 @@ const fr: Messages = {
   'auth.register.altQuestion': 'Vous en avez déjà un ?',
   'auth.register.altLink': 'Se connecter',
   'auth.register.errorGeneric': 'Impossible de créer le compte.',
+  'auth.register.inviteCode': 'Code d’invitation',
+  'auth.register.inviteCodePlaceholder': 'NLJELA',
+  'auth.register.errorInviteCode': 'Code d’invitation invalide.',
   'auth.layout.footer': 'Un éditeur pour les pensées lentes.',
 
   /* ----------------------------- Dialogs ----------------------------- */
