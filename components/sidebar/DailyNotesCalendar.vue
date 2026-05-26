@@ -20,8 +20,17 @@ function todayRef(): MonthRef {
   const d = new Date()
   return { year: d.getFullYear(), month: d.getMonth() }
 }
+function toLocalIso(d: Date): string {
+  // Use local Y/M/D — NOT toISOString(), which converts to UTC and shifts
+  // by one day for users east of UTC (e.g. CEST: midnight local = 22:00Z
+  // of the previous day → the 29th would round-trip as "28").
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10)
+  return toLocalIso(new Date())
 }
 
 const cursor = ref<MonthRef>(todayRef())
@@ -62,7 +71,7 @@ const grid = computed<DayCell[][]>(() => {
     for (let c = 0; c < 7; c++) {
       const d = new Date(gridStart)
       d.setDate(gridStart.getDate() + r * 7 + c)
-      const iso = d.toISOString().slice(0, 10)
+      const iso = toLocalIso(d)
       row.push({
         date: iso,
         day: d.getDate(),
@@ -166,7 +175,7 @@ async function openDay(cell: DayCell): Promise<void> {
         type="button"
         class="dn-today"
         :title="t('journal.openToday')"
-        @click="openDay({ date: (new Date()).toISOString().slice(0,10), day: 0, inMonth: true, isToday: true, hasNote: false })"
+        @click="openDay({ date: todayIso(), day: 0, inMonth: true, isToday: true, hasNote: false })"
       >
         {{ t('journal.today') }}
       </button>

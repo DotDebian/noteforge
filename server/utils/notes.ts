@@ -953,6 +953,16 @@ export async function analyzeUserDocument(
 
 const DAILY_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
+/**
+ * True when a document title matches the journal-note convention
+ * (`YYYY-MM-DD`). The sidebar tree uses this to hide journal notes from
+ * the main document list — they're surfaced through the calendar widget
+ * instead.
+ */
+export function isDailyNoteTitle(title: string | null | undefined): boolean {
+  return typeof title === 'string' && DAILY_DATE_RE.test(title)
+}
+
 function buildDailyTemplate(date: string): string {
   // The H1 mirrors the title so the markdown stays readable when opened
   // outside the editor (export / git). Sections cover the typical
