@@ -15,6 +15,7 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import process from 'node:process'
 import Database from 'better-sqlite3'
+import * as sqliteVec from 'sqlite-vec'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator'
 
@@ -27,6 +28,18 @@ if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
 const sqlite = new Database(dbPath)
 sqlite.pragma('journal_mode = WAL')
 sqlite.pragma('foreign_keys = ON')
+
+// Load sqlite-vec so migration 0004 (CREATE VIRTUAL TABLE ... USING vec0)
+// can run. The runtime DB connection in server/database/client.ts does the
+// same; without it the migration aborts with "no such module: vec0".
+try {
+  sqliteVec.load(sqlite)
+}
+catch (err) {
+  console.error('[noteforge] failed to load sqlite-vec extension:', err)
+  sqlite.close()
+  process.exit(1)
+}
 
 try {
   const db = drizzle(sqlite)
