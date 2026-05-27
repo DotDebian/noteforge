@@ -263,7 +263,10 @@ export async function retrieveViaFts(
       text: docChunks.text,
     })
     .from(docChunks)
-    .where(inArray(docChunks.id, matches.map(m => m.rowid)))
+    .where(and(
+      inArray(docChunks.id, matches.map(m => m.rowid)),
+      inArray(docChunks.docId, candidateDocIds),
+    ))
 
   const byId = new Map<number, { docId: number, idx: number, text: string }>(
     rows.map(r => [r.id, { docId: r.docId, idx: r.idx, text: decryptChunkText(r.text, dek) }] as const),
