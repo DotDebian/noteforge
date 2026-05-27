@@ -62,6 +62,7 @@ export async function rerankChunks(
   query: string,
   candidates: ScoredChunk[],
   topK: number,
+  userId?: number,
 ): Promise<ScoredChunk[]> {
   if (candidates.length === 0) return candidates
   if (candidates.length === 1) return candidates.slice(0, topK)
@@ -84,6 +85,8 @@ export async function rerankChunks(
       jsonMode: true,
       temperature: 0,
       model: FAST_MODEL,
+      userId,
+      operation: 'rerank',
     })
     const parsed = JSON.parse(content) as RerankResponse
     llmScores = parseScores(parsed, candidates.length)

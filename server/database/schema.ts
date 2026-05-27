@@ -13,6 +13,9 @@ export const users = sqliteTable('users', {
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .default(sql`(unixepoch())`),
+  lastLoginAt: integer('last_login_at', { mode: 'timestamp' }),
+  isAdmin: integer('is_admin', { mode: 'boolean' }).notNull().default(false),
+  disabledAt: integer('disabled_at', { mode: 'timestamp' }),
   /* ---- At-rest encryption (per-user wrapped DEK) ---- */
   /** scrypt salt used to derive the KDK from the password. */
   kdfSalt: blob('kdf_salt', { mode: 'buffer' }),
@@ -474,6 +477,30 @@ export const savedSearches = sqliteTable(
   }),
 )
 
+/* -------------------------------------------------------------------------- */
+/*  AI usage logging                                                           */
+/* -------------------------------------------------------------------------- */
+
+export const aiUsageLogs = sqliteTable(
+  'ai_usage_logs',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
+    model: text('model').notNull(),
+    operation: text('operation').notNull(),
+    promptTokens: integer('prompt_tokens').notNull().default(0),
+    completionTokens: integer('completion_tokens').notNull().default(0),
+    totalTokens: integer('total_tokens').notNull().default(0),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    userIdx: index('ai_usage_logs_user_idx').on(t.userId),
+    createdIdx: index('ai_usage_logs_created_idx').on(t.createdAt),
+  }),
+)
+
 export const chatMessages = sqliteTable(
   'chat_messages',
   {
@@ -581,3 +608,5 @@ export type UserTotp = typeof userTotp.$inferSelect
 export type NewUserTotp = typeof userTotp.$inferInsert
 export type SavedSearch = typeof savedSearches.$inferSelect
 export type NewSavedSearch = typeof savedSearches.$inferInsert
+export type AiUsageLog = typeof aiUsageLogs.$inferSelect
+export type NewAiUsageLog = typeof aiUsageLogs.$inferInsert

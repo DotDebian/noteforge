@@ -61,9 +61,16 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 401, statusMessage: 'Invalid credentials' })
   }
 
+  if (row.disabledAt != null) {
+    throw createError({ statusCode: 403, statusMessage: 'Account disabled' })
+  }
+
   // Success — give the email bucket its token back. Failed attempts still
   // count, only the verified-good-password attempt is refunded.
   release(emailKey)
+
+  // Record last login timestamp (fire-and-forget — never block the response).
+  void db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, row.id))
 
   /* ---- Encryption: unwrap the DEK (or migrate a legacy user) ----------- */
   let dek: Buffer

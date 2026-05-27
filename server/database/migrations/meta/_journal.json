@@ -134,6 +134,13 @@
       "when": 1780800000000,
       "tag": "0018_hot_vampiro",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1748390400000,
+      "tag": "0019_admin_panel",
+      "breakpoints": true
     }
   ]
 }

@@ -14,11 +14,12 @@ export async function bcryptVerifyPassword(plain: string, hash: string): Promise
 }
 
 export function serializeUser(
-  user: Pick<User, 'id' | 'email'> & Partial<Pick<User, 'displayName'>>,
-): { id: number, email: string, displayName: string | null } {
+  user: Pick<User, 'id' | 'email'> & Partial<Pick<User, 'displayName' | 'isAdmin'>>,
+): { id: number, email: string, displayName: string | null, isAdmin: boolean } {
   return {
     id: user.id,
     email: user.email,
     displayName: user.displayName ?? null,
+    isAdmin: user.isAdmin ?? false,
   }
 }

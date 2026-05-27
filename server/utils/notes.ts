@@ -774,6 +774,7 @@ async function embedDocSummary(
   docId: number,
   title: string,
   analysis: Analysis,
+  userId?: number,
 ): Promise<void> {
   const parts = [
     title.trim(),
@@ -784,7 +785,7 @@ async function embedDocSummary(
   const text = parts.join('\n\n').trim()
   if (text.length === 0) return
 
-  const [vec] = await mistralEmbed([text])
+  const [vec] = await mistralEmbed([text], { userId, operation: 'embed_summary' })
   if (!vec || vec.length === 0) return
 
   // The summary embedding vector itself is intentionally NOT encrypted —
@@ -824,6 +825,8 @@ export async function analyzeUserDocument(
     ],
     jsonMode: true,
     temperature: 0.2,
+    userId,
+    operation: 'analyze',
   })
 
   let parsed: unknown
@@ -921,8 +924,8 @@ export async function analyzeUserDocument(
   // `embedDocument` writes encrypted chunks; pass DEK + the plaintext
   // markdown so chunking + FTS5 mirror operate on cleartext.
   void Promise.all([
-    embedDocument(docId, doc.markdown, dek),
-    embedDocSummary(docId, doc.title, analysis),
+    embedDocument(docId, doc.markdown, dek, userId),
+    embedDocSummary(docId, doc.title, analysis, userId),
   ])
     .then(async () => {
       await db

@@ -189,10 +189,10 @@ export default defineEventHandler(async (event) => {
   // The rewriter resolves pronouns / anaphora against prior turns so the
   // embedding step doesn't blow on follow-ups like "et le second point ?".
   // Failures fall back to the original message inside the helper.
-  const retrievalQuery = await rewriteQuery(historyMessages, input.message)
+  const retrievalQuery = await rewriteQuery(historyMessages, input.message, user.id)
 
   /* ---------- 5. Retrieve context ---------------------------------------- */
-  const queryVectors = await mistralEmbed([retrievalQuery])
+  const queryVectors = await mistralEmbed([retrievalQuery], { userId: user.id, operation: 'embed_query' })
   const queryVec = queryVectors[0] ?? []
 
   // Candidate docs in the workspace, optionally constrained to a folder or
@@ -236,7 +236,7 @@ export default defineEventHandler(async (event) => {
     // Second stage: Mistral reranker. Reorders the pool against the rewritten
     // query and keeps roughly 2× SEARCH_TOP_K so the per-doc cap below has
     // something to pick from.
-    const reranked = await rerankChunks(retrievalQuery, scored, SEARCH_TOP_K * 2)
+    const reranked = await rerankChunks(retrievalQuery, scored, SEARCH_TOP_K * 2, user.id)
 
     // Apply the per-doc cap (workspace mode only) and trim to SEARCH_TOP_K.
     const finalCap = effectiveDocId != null ? Number.POSITIVE_INFINITY : 2
@@ -298,7 +298,7 @@ export default defineEventHandler(async (event) => {
       send({ type: 'session', sessionId: finalSessionId })
 
       try {
-        for await (const delta of mistralChatStream({ messages, temperature: 0.2 })) {
+        for await (const delta of mistralChatStream({ messages, temperature: 0.2, userId: user.id, operation: 'chat_stream' })) {
           collected += delta
           send({ type: 'delta', text: delta })
         }

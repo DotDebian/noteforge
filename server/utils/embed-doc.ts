@@ -50,6 +50,7 @@ export async function embedDocument(
   docId: number,
   markdown: string,
   dek: Buffer | null = null,
+  userId?: number,
 ): Promise<number> {
   const db = useDb()
   const chunks = chunkMarkdown(markdown)
@@ -81,7 +82,7 @@ export async function embedDocument(
   const chunkTexts = chunks.map(c => c.text)
   const embeddings: number[][] = []
   for (let i = 0; i < chunkTexts.length; i += BATCH) {
-    const vecs = await mistralEmbed(chunkTexts.slice(i, i + BATCH))
+    const vecs = await mistralEmbed(chunkTexts.slice(i, i + BATCH), { userId, operation: 'embed' })
     for (const v of vecs) embeddings.push(v)
   }
 

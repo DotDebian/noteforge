@@ -306,6 +306,8 @@ async function onBulkExport() {
   }
 }
 
+const isAdmin = computed(() => !!(user.value as { isAdmin?: boolean } | null)?.isAdmin)
+
 const displayName = computed(() => {
   const u = user.value as { displayName?: string | null, email?: string } | null
   return u?.displayName || u?.email || 'You'
@@ -921,6 +923,26 @@ async function onRootDocDrop(e: DragEvent) {
           />
         </svg>
         <span>{{ t('sidebar.trash') }}</span>
+      </NuxtLink>
+
+      <NuxtLink
+        v-if="isAdmin"
+        to="/admin"
+        class="trash-link"
+        active-class="trash-link--active"
+        title="Panneau d'administration"
+      >
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+          <path
+            d="M2 3h12v2H2z M2 7h12v2H2z M2 11h7v2H2z M12 10l2 2-2 2"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.25"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <span>Admin</span>
       </NuxtLink>
 
       <div class="user-row" :title="userEmail">

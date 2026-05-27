@@ -8,11 +8,30 @@
  */
 import { createError } from 'h3'
 import { recordMistralSuccess } from './mistral-health'
+import { useDb } from '~/server/database/client'
+import { aiUsageLogs } from '~/server/database/schema'
 
 // `useRuntimeConfig` is an auto-imported Nitro helper in server contexts.
 
 function markSuccess(): void {
   try { recordMistralSuccess() } catch { /* health tracking must never throw */ }
+}
+
+function logMistralUsage(
+  userId: number | undefined,
+  model: string,
+  operation: string,
+  promptTokens: number,
+  completionTokens: number,
+  totalTokens: number,
+): void {
+  if (!userId) return
+  void Promise.resolve().then(async () => {
+    try {
+      await useDb().insert(aiUsageLogs).values({ userId, model, operation, promptTokens, completionTokens, totalTokens })
+    }
+    catch { /* never surface logging errors */ }
+  })
 }
 
 const MISTRAL_API_BASE = 'https://api.mistral.ai/v1'
@@ -34,6 +53,7 @@ interface MistralChatResponse {
   id: string
   model: string
   choices: MistralChatChoice[]
+  usage?: { prompt_tokens: number, completion_tokens: number, total_tokens: number }
 }
 
 interface MistralStreamDelta {
@@ -50,6 +70,7 @@ interface MistralStreamChoice {
 interface MistralStreamChunk {
   id: string
   choices: MistralStreamChoice[]
+  usage?: { prompt_tokens: number, completion_tokens: number, total_tokens: number }
 }
 
 interface MistralEmbeddingItem {
@@ -61,6 +82,7 @@ interface MistralEmbeddingResponse {
   id: string
   model: string
   data: MistralEmbeddingItem[]
+  usage?: { prompt_tokens: number, total_tokens: number }
 }
 
 interface MistralErrorPayload {
@@ -118,6 +140,8 @@ export interface MistralChatOptions {
   jsonMode?: boolean
   temperature?: number
   model?: string
+  userId?: number
+  operation?: string
 }
 
 export async function mistralChat(opts: MistralChatOptions): Promise<{ content: string }> {
@@ -170,6 +194,10 @@ export async function mistralChat(opts: MistralChatOptions): Promise<{ content: 
     })
   }
   markSuccess()
+  if (json.usage) {
+    logMistralUsage(opts.userId, getChatModel(opts.model), opts.operation ?? 'chat',
+      json.usage.prompt_tokens, json.usage.completion_tokens, json.usage.total_tokens)
+  }
   return { content }
 }
 
@@ -181,6 +209,8 @@ export interface MistralStreamOptions {
   messages: MistralMessage[]
   temperature?: number
   model?: string
+  userId?: number
+  operation?: string
 }
 
 /**
@@ -196,6 +226,7 @@ export async function* mistralChatStream(
     messages: opts.messages,
     temperature: opts.temperature ?? 0.2,
     stream: true,
+    stream_options: { include_usage: true },
   }
 
   let res: Response
@@ -230,6 +261,7 @@ export async function* mistralChatStream(
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buf = ''
+  let capturedUsage: MistralStreamChunk['usage'] | undefined
 
   try {
     while (true) {
@@ -256,11 +288,16 @@ export async function* mistralChatStream(
         const payload = dataLines.join('\n')
         if (payload === '[DONE]') {
           markSuccess()
+          if (capturedUsage) {
+            logMistralUsage(opts.userId, getChatModel(opts.model), opts.operation ?? 'chat_stream',
+              capturedUsage.prompt_tokens, capturedUsage.completion_tokens, capturedUsage.total_tokens)
+          }
           return
         }
 
         try {
           const parsed = JSON.parse(payload) as MistralStreamChunk
+          if (parsed.usage) capturedUsage = parsed.usage
           const delta = parsed.choices[0]?.delta?.content
           if (typeof delta === 'string' && delta.length > 0) {
             yield delta
@@ -283,10 +320,11 @@ export async function* mistralChatStream(
 
 export async function mistralEmbed(
   inputs: string[],
-  model?: string,
+  opts?: string | { model?: string, userId?: number, operation?: string },
 ): Promise<number[][]> {
   if (inputs.length === 0) return []
   const apiKey = getApiKey()
+  const embedOpts = typeof opts === 'string' ? { model: opts } : (opts ?? {})
 
   let res: Response
   try {
@@ -297,7 +335,7 @@ export async function mistralEmbed(
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
-      body: JSON.stringify({ model: getEmbedModel(model), input: inputs }),
+      body: JSON.stringify({ model: getEmbedModel(embedOpts.model), input: inputs }),
     })
   }
   catch (err) {
@@ -331,6 +369,10 @@ export async function mistralEmbed(
     if (!out[i]) out[i] = []
   }
   markSuccess()
+  if (json.usage) {
+    logMistralUsage(embedOpts.userId, getEmbedModel(embedOpts.model), embedOpts.operation ?? 'embed',
+      json.usage.prompt_tokens, 0, json.usage.total_tokens)
+  }
   return out
 }
 

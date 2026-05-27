@@ -43,6 +43,7 @@ interface RewriteResponse {
 export async function rewriteQuery(
   history: MistralMessage[],
   current: string,
+  userId?: number,
 ): Promise<string> {
   const trimmed = current.trim()
   if (trimmed.length === 0) return current
@@ -72,6 +73,8 @@ export async function rewriteQuery(
       jsonMode: true,
       temperature: 0,
       model: FAST_MODEL,
+      userId,
+      operation: 'rewrite',
     })
     const parsed = JSON.parse(content) as RewriteResponse
     const out = typeof parsed.query === 'string' ? parsed.query.trim() : ''
