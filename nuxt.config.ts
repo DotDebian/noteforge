@@ -31,12 +31,14 @@ export default defineNuxtConfig({
   nitro: {
     // sqlite-vec ships its native .so via a platform-suffixed sibling package
     // (sqlite-vec-linux-x64, sqlite-vec-darwin-arm64, ...) and resolves it
-    // dynamically. Nitro's NFT trace inlines sqlite-vec/index.mjs into
-    // .output/server/node_modules/ but cannot follow that dynamic resolution,
-    // so the binary package is missing at runtime. Forcing the wrapper external
-    // makes Nitro fall back to standard Node resolution against the top-level
-    // node_modules the Dockerfile copies in, which has every platform sibling
-    // pnpm decided to install for this image.
+    // dynamically via import.meta.resolve. Nitro's NFT trace inlines
+    // sqlite-vec/index.mjs into .output/server/node_modules/ but cannot follow
+    // that dynamic resolution, so the binary package must already exist where
+    // Node's parent-directory walk can find it at runtime. Forcing the wrapper
+    // external keeps the runtime resolve path, and .npmrc's
+    // `public-hoist-pattern[]=sqlite-vec-*` ensures pnpm puts the platform
+    // binary at /app/node_modules/sqlite-vec-<os>-<arch>/ (top level) instead
+    // of burying it under .pnpm/, so the walk from .output/server/ reaches it.
     externals: {
       external: ['sqlite-vec'],
     },

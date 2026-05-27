@@ -12,7 +12,10 @@ RUN corepack enable
 WORKDIR /app
 
 # Install deps first so layer cache survives source-only edits.
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# .npmrc carries the `public-hoist-pattern[]=sqlite-vec-*` rule that lifts the
+# platform binary (sqlite-vec-linux-x64) to /app/node_modules/, where Nitro's
+# bundled sqlite-vec wrapper can reach it via Node's parent-directory walk.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 RUN pnpm install --frozen-lockfile
 
 COPY . .
