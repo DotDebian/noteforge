@@ -13,6 +13,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import type { User } from '~/server/database/schema'
 import { requireMcpUser } from '~/server/utils/mcpAuth'
+import { logMcpCall } from '~/server/utils/mcpCalls'
 import {
   analyzeUserDocument,
   createUserDocument,
@@ -58,11 +59,36 @@ function jsonResult(payload: unknown) {
   }
 }
 
-function buildServer(user: User, dek: Buffer | null): McpServer {
+function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer {
   const server = new McpServer({
     name: 'noteforge',
     version: '0.1.0',
   })
+
+  /**
+   * Wrap a tool handler with timing + success/failure logging into
+   * `mcp_call_logs`. Errors are re-thrown — the transport surfaces them as
+   * JSON-RPC errors to the client; we only intercept to record them.
+   */
+  function instrument<TArgs>(
+    toolName: string,
+    handler: (args: TArgs) => Promise<ReturnType<typeof jsonResult>>,
+  ): (args: TArgs) => Promise<ReturnType<typeof jsonResult>> {
+    return async (args: TArgs) => {
+      const start = Date.now()
+      try {
+        const result = await handler(args)
+        logMcpCall({ tokenId, userId: user.id, toolName, success: true, latencyMs: Date.now() - start })
+        return result
+      }
+      catch (err) {
+        const code = (err as { statusCode?: number | string }).statusCode
+        const errorCode = code != null ? String(code) : 'internal'
+        logMcpCall({ tokenId, userId: user.id, toolName, success: false, latencyMs: Date.now() - start, errorCode })
+        throw err
+      }
+    }
+  }
 
   /* ---------- Workspaces ------------------------------------------------- */
 
@@ -72,7 +98,7 @@ function buildServer(user: User, dek: Buffer | null): McpServer {
       title: 'List workspaces',
       description: 'Return every workspace owned by the authenticated user (newest first).',
     },
-    async () => jsonResult({ workspaces: await listUserWorkspaces(user.id, dek) }),
+    instrument('list_workspaces', async () => jsonResult({ workspaces: await listUserWorkspaces(user.id, dek) })),
   )
 
   server.registerTool(
@@ -84,7 +110,7 @@ function buildServer(user: User, dek: Buffer | null): McpServer {
         workspaceId: z.number().int().positive(),
       },
     },
-    async ({ workspaceId }) => jsonResult(await getUserWorkspace(user.id, workspaceId, dek)),
+    instrument('get_workspace', async ({ workspaceId }: { workspaceId: number }) => jsonResult(await getUserWorkspace(user.id, workspaceId, dek))),
   )
 
   /* ---------- Documents -------------------------------------------------- */
@@ -104,9 +130,9 @@ function buildServer(user: User, dek: Buffer | null): McpServer {
           .optional(),
       },
     },
-    async ({ workspaceId, folderId }) => jsonResult({
+    instrument('list_documents', async ({ workspaceId, folderId }: { workspaceId: number, folderId?: 'root' | number }) => jsonResult({
       documents: await listUserDocuments(user.id, workspaceId, { folderId }, dek),
-    }),
+    })),
   )
 
   server.registerTool(
@@ -120,9 +146,9 @@ function buildServer(user: User, dek: Buffer | null): McpServer {
         documentId: z.number().int().positive(),
       },
     },
-    async ({ documentId }) => jsonResult(
+    instrument('read_document', async ({ documentId }: { documentId: number }) => jsonResult(
       await getUserDocument(user.id, documentId, { includeTrashed: false }, dek),
-    ),
+    )),
   )
 
   server.registerTool(
@@ -137,14 +163,14 @@ function buildServer(user: User, dek: Buffer | null): McpServer {
         markdown: z.string().max(2_000_000).optional(),
       },
     },
-    async ({ workspaceId, folderId, title, markdown }) => jsonResult({
+    instrument('create_document', async ({ workspaceId, folderId, title, markdown }: { workspaceId: number, folderId?: number | null, title?: string, markdown?: string }) => jsonResult({
       document: await createUserDocument(user.id, {
         workspaceId,
         folderId: folderId ?? null,
         title,
         markdown,
       }, dek),
-    }),
+    })),
   )
 
   server.registerTool(
@@ -161,13 +187,13 @@ function buildServer(user: User, dek: Buffer | null): McpServer {
         folderId: z.number().int().positive().nullable().optional(),
       },
     },
-    async ({ documentId, title, markdown, folderId }) => jsonResult({
+    instrument('update_document', async ({ documentId, title, markdown, folderId }: { documentId: number, title?: string, markdown?: string, folderId?: number | null }) => jsonResult({
       document: await updateUserDocument(user.id, documentId, {
         title,
         markdown,
         folderId,
       }, dek),
-    }),
+    })),
   )
 
   server.registerTool(
@@ -181,9 +207,9 @@ function buildServer(user: User, dek: Buffer | null): McpServer {
         documentId: z.number().int().positive(),
       },
     },
-    async ({ documentId }) => jsonResult(
+    instrument('delete_document', async ({ documentId }: { documentId: number }) => jsonResult(
       await softDeleteUserDocument(user.id, documentId),
-    ),
+    )),
   )
 
   /* ---------- Folders ---------------------------------------------------- */
@@ -199,13 +225,13 @@ function buildServer(user: User, dek: Buffer | null): McpServer {
         name: z.string().trim().min(1).max(120),
       },
     },
-    async ({ workspaceId, parentId, name }) => jsonResult({
+    instrument('create_folder', async ({ workspaceId, parentId, name }: { workspaceId: number, parentId?: number | null, name: string }) => jsonResult({
       folder: await createUserFolder(user.id, {
         workspaceId,
         parentId: parentId ?? null,
         name,
       }, dek),
-    }),
+    })),
   )
 
   server.registerTool(
@@ -221,9 +247,9 @@ function buildServer(user: User, dek: Buffer | null): McpServer {
         parentId: z.number().int().positive().nullable().optional(),
       },
     },
-    async ({ folderId, name, parentId }) => jsonResult({
+    instrument('update_folder', async ({ folderId, name, parentId }: { folderId: number, name?: string, parentId?: number | null }) => jsonResult({
       folder: await updateUserFolder(user.id, folderId, { name, parentId }, dek),
-    }),
+    })),
   )
 
   server.registerTool(
@@ -237,9 +263,9 @@ function buildServer(user: User, dek: Buffer | null): McpServer {
         folderId: z.number().int().positive(),
       },
     },
-    async ({ folderId }) => jsonResult(
+    instrument('delete_folder', async ({ folderId }: { folderId: number }) => jsonResult(
       await softDeleteUserFolder(user.id, folderId),
-    ),
+    )),
   )
 
   /* ---------- Search & AI ------------------------------------------------ */
@@ -258,9 +284,9 @@ function buildServer(user: User, dek: Buffer | null): McpServer {
         query: z.string().trim().min(1).max(8000),
       },
     },
-    async ({ workspaceId, query }) => jsonResult({
+    instrument('search_notes', async ({ workspaceId, query }: { workspaceId: number, query: string }) => jsonResult({
       hits: await searchUserWorkspace(user.id, workspaceId, query, dek),
-    }),
+    })),
   )
 
   server.registerTool(
@@ -275,9 +301,9 @@ function buildServer(user: User, dek: Buffer | null): McpServer {
         documentId: z.number().int().positive(),
       },
     },
-    async ({ documentId }) => jsonResult({
+    instrument('analyze_document', async ({ documentId }: { documentId: number }) => jsonResult({
       analysis: await analyzeUserDocument(user.id, documentId, dek),
-    }),
+    })),
   )
 
   return server
@@ -315,7 +341,7 @@ async function toWebRequest(event: Parameters<Parameters<typeof defineEventHandl
 }
 
 export default defineEventHandler(async (event) => {
-  const { user, dek } = await requireMcpUser(event)
+  const { user, dek, tokenId } = await requireMcpUser(event)
   const method = getMethod(event)
 
   // The transport implements POST (RPC messages), GET (server-initiated SSE
@@ -328,7 +354,7 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  const server = buildServer(user, dek)
+  const server = buildServer(user, dek, tokenId)
   const transport = new WebStandardStreamableHTTPServerTransport({
     // Stateless mode: no session cookie, every request is independent.
     sessionIdGenerator: undefined,

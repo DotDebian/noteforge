@@ -5,6 +5,7 @@ import { useDb } from '~/server/database/client'
 import { users } from '~/server/database/schema'
 import { requireAdmin } from '~/server/utils/require-admin'
 import { parseIdParam } from '~/server/utils/access'
+import { logAdminAction } from '~/server/utils/audit'
 
 const Body = z.object({
   action: z.enum(['disable', 'enable', 'promote', 'demote']),
@@ -40,6 +41,14 @@ export default defineEventHandler(async (event) => {
   if (!updated) {
     throw createError({ statusCode: 500, statusMessage: 'Update failed' })
   }
+
+  logAdminAction({
+    adminId: admin.id,
+    action: `user.${action}`,
+    targetType: 'user',
+    targetId,
+    payload: {},
+  })
 
   return {
     user: {

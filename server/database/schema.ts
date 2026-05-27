@@ -491,6 +491,9 @@ export const aiUsageLogs = sqliteTable(
     promptTokens: integer('prompt_tokens').notNull().default(0),
     completionTokens: integer('completion_tokens').notNull().default(0),
     totalTokens: integer('total_tokens').notNull().default(0),
+    success: integer('success', { mode: 'boolean' }).notNull().default(true),
+    latencyMs: integer('latency_ms'),
+    errorCode: text('error_code'),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .default(sql`(unixepoch())`),
@@ -500,6 +503,195 @@ export const aiUsageLogs = sqliteTable(
     createdIdx: index('ai_usage_logs_created_idx').on(t.createdAt),
   }),
 )
+
+/* -------------------------------------------------------------------------- */
+/*  Admin panel: instrumentation, audit, observability                         */
+/* -------------------------------------------------------------------------- */
+
+export const loginAttempts = sqliteTable(
+  'login_attempts',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    email: text('email').notNull(),
+    userId: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
+    success: integer('success', { mode: 'boolean' }).notNull(),
+    errorCode: text('error_code'),
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    emailIdx: index('login_attempts_email_idx').on(t.email),
+    createdIdx: index('login_attempts_created_idx').on(t.createdAt),
+  }),
+)
+
+export const adminAuditLog = sqliteTable(
+  'admin_audit_log',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    adminId: integer('admin_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    action: text('action').notNull(),
+    targetType: text('target_type'),
+    targetId: integer('target_id'),
+    payload: text('payload', { mode: 'json' }).$type<Record<string, unknown>>(),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    adminIdx: index('admin_audit_log_admin_idx').on(t.adminId),
+    createdIdx: index('admin_audit_log_created_idx').on(t.createdAt),
+  }),
+)
+
+export const mcpCallLogs = sqliteTable(
+  'mcp_call_logs',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    tokenId: integer('token_id').references(() => mcpTokens.id, { onDelete: 'set null' }),
+    userId: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
+    toolName: text('tool_name').notNull(),
+    success: integer('success', { mode: 'boolean' }).notNull(),
+    latencyMs: integer('latency_ms'),
+    errorCode: text('error_code'),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    tokenIdx: index('mcp_call_logs_token_idx').on(t.tokenId),
+    userIdx: index('mcp_call_logs_user_idx').on(t.userId),
+    toolIdx: index('mcp_call_logs_tool_idx').on(t.toolName),
+    createdIdx: index('mcp_call_logs_created_idx').on(t.createdAt),
+  }),
+)
+
+export const ragQualityLogs = sqliteTable(
+  'rag_quality_logs',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    sessionId: integer('session_id').references(() => chatSessions.id, { onDelete: 'set null' }),
+    userId: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
+    chunksReturned: integer('chunks_returned').notNull().default(0),
+    rerankScoreAvg: text('rerank_score_avg'),
+    citationsEmitted: integer('citations_emitted').notNull().default(0),
+    hasCitation: integer('has_citation', { mode: 'boolean' }).notNull().default(false),
+    rewriterUsed: integer('rewriter_used', { mode: 'boolean' }).notNull().default(false),
+    rerankerUsed: integer('reranker_used', { mode: 'boolean' }).notNull().default(false),
+    latencyMs: integer('latency_ms'),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    userIdx: index('rag_quality_logs_user_idx').on(t.userId),
+    createdIdx: index('rag_quality_logs_created_idx').on(t.createdAt),
+  }),
+)
+
+export const healthSnapshots = sqliteTable(
+  'health_snapshots',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    dbSizeBytes: integer('db_size_bytes').notNull().default(0),
+    usersCount: integer('users_count').notNull().default(0),
+    docsCount: integer('docs_count').notNull().default(0),
+    chunksCount: integer('chunks_count').notNull().default(0),
+    sessionsCount: integer('sessions_count').notNull().default(0),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    createdIdx: index('health_snapshots_created_idx').on(t.createdAt),
+  }),
+)
+
+export const userQuotas = sqliteTable('user_quotas', {
+  userId: integer('user_id')
+    .primaryKey()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  maxDocs: integer('max_docs'),
+  maxTokensMonth: integer('max_tokens_month'),
+  maxWorkspaces: integer('max_workspaces'),
+  updatedAt: integer('updated_at', { mode: 'timestamp' })
+    .notNull()
+    .default(sql`(unixepoch())`),
+})
+
+export const appLogs = sqliteTable(
+  'app_logs',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    level: text('level', { enum: ['debug', 'info', 'warn', 'error'] }).notNull(),
+    source: text('source').notNull(),
+    message: text('message').notNull(),
+    context: text('context', { mode: 'json' }).$type<Record<string, unknown>>(),
+    userId: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    levelIdx: index('app_logs_level_idx').on(t.level),
+    createdIdx: index('app_logs_created_idx').on(t.createdAt),
+  }),
+)
+
+export const jobs = sqliteTable(
+  'jobs',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    type: text('type').notNull(),
+    status: text('status', { enum: ['pending', 'running', 'completed', 'failed'] }).notNull().default('pending'),
+    payload: text('payload', { mode: 'json' }).$type<Record<string, unknown>>(),
+    userId: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
+    startedAt: integer('started_at', { mode: 'timestamp' }),
+    completedAt: integer('completed_at', { mode: 'timestamp' }),
+    durationMs: integer('duration_ms'),
+    errorMessage: text('error_message'),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    statusIdx: index('jobs_status_idx').on(t.status),
+    typeIdx: index('jobs_type_idx').on(t.type),
+    createdIdx: index('jobs_created_idx').on(t.createdAt),
+  }),
+)
+
+export const decryptionFailures = sqliteTable(
+  'decryption_failures',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
+    entityType: text('entity_type').notNull(),
+    entityId: integer('entity_id'),
+    field: text('field').notNull(),
+    errorMessage: text('error_message'),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    userIdx: index('decryption_failures_user_idx').on(t.userId),
+    createdIdx: index('decryption_failures_created_idx').on(t.createdAt),
+  }),
+)
+
+export const retentionPolicy = sqliteTable('retention_policy', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' })
+    .notNull()
+    .default(sql`(unixepoch())`),
+})
 
 export const chatMessages = sqliteTable(
   'chat_messages',
@@ -610,3 +802,23 @@ export type SavedSearch = typeof savedSearches.$inferSelect
 export type NewSavedSearch = typeof savedSearches.$inferInsert
 export type AiUsageLog = typeof aiUsageLogs.$inferSelect
 export type NewAiUsageLog = typeof aiUsageLogs.$inferInsert
+export type LoginAttempt = typeof loginAttempts.$inferSelect
+export type NewLoginAttempt = typeof loginAttempts.$inferInsert
+export type AdminAuditLog = typeof adminAuditLog.$inferSelect
+export type NewAdminAuditLog = typeof adminAuditLog.$inferInsert
+export type McpCallLog = typeof mcpCallLogs.$inferSelect
+export type NewMcpCallLog = typeof mcpCallLogs.$inferInsert
+export type RagQualityLog = typeof ragQualityLogs.$inferSelect
+export type NewRagQualityLog = typeof ragQualityLogs.$inferInsert
+export type HealthSnapshot = typeof healthSnapshots.$inferSelect
+export type NewHealthSnapshot = typeof healthSnapshots.$inferInsert
+export type UserQuota = typeof userQuotas.$inferSelect
+export type NewUserQuota = typeof userQuotas.$inferInsert
+export type AppLog = typeof appLogs.$inferSelect
+export type NewAppLog = typeof appLogs.$inferInsert
+export type Job = typeof jobs.$inferSelect
+export type NewJob = typeof jobs.$inferInsert
+export type DecryptionFailure = typeof decryptionFailures.$inferSelect
+export type NewDecryptionFailure = typeof decryptionFailures.$inferInsert
+export type RetentionPolicy = typeof retentionPolicy.$inferSelect
+export type NewRetentionPolicy = typeof retentionPolicy.$inferInsert

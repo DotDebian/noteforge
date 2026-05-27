@@ -20,7 +20,7 @@
  * a `mode: 'json'` column would explode on the next read because Drizzle
  * runs `JSON.parse` on the raw text.
  */
-import { decryptField, encryptField } from './crypto'
+import { decryptField, encryptField, type DecryptFieldContext } from './crypto'
 import type {
   ChatMessage,
   DocAnalysis,
@@ -36,8 +36,8 @@ type Maybe<T> = T | null | undefined
 function enc(s: string, dek: Buffer | null | undefined): string {
   return encryptField(s, dek ?? null)
 }
-function dec(s: Maybe<string>, dek: Buffer | null | undefined): string {
-  return decryptField(s, dek ?? null)
+function dec(s: Maybe<string>, dek: Buffer | null | undefined, ctx?: DecryptFieldContext): string {
+  return decryptField(s, dek ?? null, ctx)
 }
 
 /* -------------------------------------------------------------------------- */
@@ -84,14 +84,20 @@ export function encryptDocument<T extends Partial<Pick<Document, 'title' | 'mark
   return { ...row, ...patch }
 }
 
-export function decryptDocument<T extends Partial<Pick<Document, 'title' | 'markdown' | 'contentJson'>>>(
+export function decryptDocument<T extends Partial<Pick<Document, 'title' | 'markdown' | 'contentJson'>> & { id?: number }>(
   row: T,
   dek: Buffer | null | undefined,
+  ctx?: { userId?: number },
 ): T {
   const patch: Partial<T> = {}
-  if (row.title != null) (patch as { title: string }).title = dec(row.title, dek)
-  if (row.markdown != null) (patch as { markdown: string }).markdown = dec(row.markdown, dek)
-  if (row.contentJson != null) (patch as { contentJson: string }).contentJson = dec(row.contentJson, dek)
+  const base: DecryptFieldContext = {
+    entityType: 'document',
+    entityId: typeof row.id === 'number' ? row.id : undefined,
+    userId: ctx?.userId,
+  }
+  if (row.title != null) (patch as { title: string }).title = dec(row.title, dek, { ...base, field: 'title' })
+  if (row.markdown != null) (patch as { markdown: string }).markdown = dec(row.markdown, dek, { ...base, field: 'markdown' })
+  if (row.contentJson != null) (patch as { contentJson: string }).contentJson = dec(row.contentJson, dek, { ...base, field: 'contentJson' })
   return { ...row, ...patch }
 }
 

@@ -18,13 +18,19 @@ interface AdminUser {
   disabledAt: string | null
   workspaceCount: number
   docCount: number
+  totalTokens: number
 }
+
+type StatusFilter = 'all' | 'active' | 'disabled' | 'admin'
+type SortKey = 'recent' | 'last_login' | 'docs' | 'tokens'
 
 const users = ref<AdminUser[]>([])
 const total = ref(0)
 const page = ref(1)
 const limit = 20
 const q = ref('')
+const status = ref<StatusFilter>('all')
+const sort = ref<SortKey>('recent')
 const loading = ref(true)
 const error = ref<string | null>(null)
 const actionLoading = ref<number | null>(null)
@@ -33,7 +39,12 @@ async function load() {
   loading.value = true
   error.value = null
   try {
-    const params = new URLSearchParams({ page: String(page.value), limit: String(limit) })
+    const params = new URLSearchParams({
+      page: String(page.value),
+      limit: String(limit),
+      status: status.value,
+      sort: sort.value,
+    })
     if (q.value.trim()) params.set('q', q.value.trim())
     const data = await $fetch<{ users: AdminUser[], total: number }>(`/api/admin/users?${params}`)
     users.value = data.users
@@ -48,7 +59,7 @@ async function load() {
 }
 
 onMounted(load)
-watch([page, q], load)
+watch([page, q, status, sort], load)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / limit)))
 
@@ -60,6 +71,12 @@ function onSearch(e: Event) {
     q.value = v
     page.value = 1
   }, 300)
+}
+
+function setStatus(s: StatusFilter) {
+  if (status.value === s) return
+  status.value = s
+  page.value = 1
 }
 
 function fmtDate(iso: string | null) {
@@ -81,7 +98,7 @@ async function doAction(user: AdminUser, action: 'disable' | 'enable' | 'promote
       : action === 'promote'
         ? 'Cet utilisateur aura accès au panneau admin.'
         : '',
-    confirmLabel: action === 'disable' || action === 'demote' ? 'Confirmer' : 'Confirmer',
+    confirmLabel: 'Confirmer',
     destructive: action === 'disable',
   })
   if (!ok) return
@@ -117,6 +134,37 @@ async function doAction(user: AdminUser, action: 'disable' | 'enable' | 'promote
       <span class="total-badge">{{ total.toLocaleString('fr-FR') }} utilisateurs</span>
     </div>
 
+    <div class="filters-row">
+      <div class="filter-group" role="tablist" aria-label="Filtre statut">
+        <button
+          v-for="opt in [
+            { key: 'all', label: 'Tous' },
+            { key: 'active', label: 'Actifs' },
+            { key: 'disabled', label: 'Désactivés' },
+            { key: 'admin', label: 'Admins' },
+          ]"
+          :key="opt.key"
+          type="button"
+          class="filter-btn"
+          :class="{ 'filter-btn--active': status === opt.key }"
+          :aria-pressed="status === opt.key"
+          @click="setStatus(opt.key as StatusFilter)"
+        >
+          {{ opt.label }}
+        </button>
+      </div>
+
+      <label class="sort-wrap">
+        <span class="sort-lbl">Trier par</span>
+        <select v-model="sort" class="sort-select">
+          <option value="recent">Récents</option>
+          <option value="last_login">Dernière connexion</option>
+          <option value="docs">Docs</option>
+          <option value="tokens">Tokens</option>
+        </select>
+      </label>
+    </div>
+
     <div v-if="error" class="error">{{ error }}</div>
 
     <div class="table-wrap">
@@ -127,6 +175,7 @@ async function doAction(user: AdminUser, action: 'disable' | 'enable' | 'promote
             <th>Inscrit le</th>
             <th>Dernière connexion</th>
             <th>WS / Docs</th>
+            <th>Tokens</th>
             <th>Statut</th>
             <th>Actions</th>
           </tr>
@@ -147,6 +196,7 @@ async function doAction(user: AdminUser, action: 'disable' | 'enable' | 'promote
             <td class="mono">{{ fmtDate(u.createdAt) }}</td>
             <td class="mono">{{ fmtDate(u.lastLoginAt) }}</td>
             <td class="mono">{{ u.workspaceCount }} / {{ u.docCount }}</td>
+            <td class="mono">{{ u.totalTokens.toLocaleString('fr-FR') }}</td>
             <td>
               <span v-if="u.isAdmin" class="badge badge--admin">Admin</span>
               <span v-if="u.disabledAt" class="badge badge--disabled">Désactivé</span>
@@ -194,7 +244,7 @@ async function doAction(user: AdminUser, action: 'disable' | 'enable' | 'promote
             </td>
           </tr>
           <tr v-if="!loading && users.length === 0">
-            <td colspan="6" class="empty-cell">Aucun utilisateur trouvé</td>
+            <td colspan="7" class="empty-cell">Aucun utilisateur trouvé</td>
           </tr>
         </tbody>
       </table>
@@ -219,6 +269,28 @@ async function doAction(user: AdminUser, action: 'disable' | 'enable' | 'promote
 }
 .search-input:focus { @apply border-accent-500; }
 .total-badge { @apply text-xs text-ink-500 dark:text-ink-400 font-sans ml-auto; }
+.filters-row { @apply flex items-center justify-between gap-4 mb-4 flex-wrap; }
+.filter-group { @apply inline-flex rounded-md border border-ink-200/60 dark:border-ink-800/60 overflow-hidden; }
+.filter-btn {
+  @apply font-sans text-[11px] uppercase tracking-[0.07em] font-semibold px-3 py-1.5 text-ink-600 dark:text-ink-400;
+  background: theme('colors.ink.50');
+  transition: background 100ms, color 100ms;
+}
+html.dark .filter-btn { background: theme('colors.ink.900'); }
+.filter-btn + .filter-btn { @apply border-l border-ink-200/60 dark:border-ink-800/60; }
+.filter-btn:hover { @apply text-ink-900 dark:text-ink-100; background: theme('colors.ink.100'); }
+html.dark .filter-btn:hover { background: theme('colors.ink.800'); }
+.filter-btn--active {
+  @apply text-accent-700 dark:text-accent-300;
+  background: theme('colors.accent.100') !important;
+}
+html.dark .filter-btn--active { background: theme('colors.accent.900' / 40%) !important; }
+.sort-wrap { @apply inline-flex items-center gap-2; }
+.sort-lbl { @apply font-sans text-[11px] uppercase tracking-[0.07em] text-ink-500 dark:text-ink-400; }
+.sort-select {
+  @apply text-sm rounded border border-ink-300 dark:border-ink-700 bg-ink-50 dark:bg-ink-900 text-ink-900 dark:text-ink-100 px-2 py-1 outline-none;
+}
+.sort-select:focus { @apply border-accent-500; }
 .error { @apply text-sm text-red-600 dark:text-red-400 mb-3; }
 .table-wrap { @apply relative rounded-lg border border-ink-200/60 dark:border-ink-800/60 overflow-x-auto; }
 .data-table { @apply w-full text-sm text-left; }

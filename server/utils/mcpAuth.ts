@@ -46,6 +46,8 @@ export interface McpAuthResult {
   user: User
   /** Per-user DEK unwrapped from the token row. `null` for legacy tokens with no wrap. */
   dek: Buffer | null
+  /** Row id of the validated `mcp_tokens` entry — surfaced for call-log attribution. */
+  tokenId: number
 }
 
 /**
@@ -119,5 +121,5 @@ export async function requireMcpUser(event: H3Event): Promise<McpAuthResult> {
       console.error('[mcp-auth] failed to update lastUsedAt', err)
     })
 
-  return { user, dek }
+  return { user, dek, tokenId: row.id }
 }

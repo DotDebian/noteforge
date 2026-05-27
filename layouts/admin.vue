@@ -11,6 +11,14 @@ const navItems = [
   { path: '/admin', label: 'Aperçu', exact: true },
   { path: '/admin/users', label: 'Utilisateurs' },
   { path: '/admin/ai-usage', label: 'Tokens IA' },
+  { path: '/admin/mcp', label: 'MCP' },
+  { path: '/admin/security', label: 'Sécurité' },
+  { path: '/admin/audit', label: 'Audit' },
+  { path: '/admin/encryption', label: 'Chiffrement' },
+  { path: '/admin/rag-quality', label: 'Qualité RAG' },
+  { path: '/admin/jobs', label: 'Jobs' },
+  { path: '/admin/logs', label: 'Logs' },
+  { path: '/admin/retention', label: 'Rétention' },
   { path: '/admin/health', label: 'Santé' },
 ]
 

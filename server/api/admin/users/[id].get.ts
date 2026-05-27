@@ -55,6 +55,38 @@ export default defineEventHandler(async (event) => {
      GROUP BY model, operation ORDER BY sum(total_tokens) DESC`,
   ).all(userId) as Array<{ model: string, operation: string, promptTokens: number, completionTokens: number, totalTokens: number }>
 
+  // Quotas (nullable row — user may not have a custom quota set).
+  const quotasRow = db.prepare(
+    `SELECT max_docs AS maxDocs, max_tokens_month AS maxTokensMonth, max_workspaces AS maxWorkspaces
+     FROM user_quotas WHERE user_id = ?`,
+  ).get(userId) as { maxDocs: number | null, maxTokensMonth: number | null, maxWorkspaces: number | null } | undefined
+
+  // MCP tokens — active / revoked split.
+  const tokenStats = db.prepare(
+    `SELECT
+       count(*) AS total,
+       sum(CASE WHEN revoked_at IS NULL THEN 1 ELSE 0 END) AS active,
+       sum(CASE WHEN revoked_at IS NOT NULL THEN 1 ELSE 0 END) AS revoked
+     FROM mcp_tokens WHERE user_id = ?`,
+  ).get(userId) as { total: number, active: number | null, revoked: number | null }
+
+  // Decryption failure count.
+  const decryptionFailures = (db.prepare(
+    'SELECT count(*) AS cnt FROM decryption_failures WHERE user_id = ?',
+  ).get(userId) as { cnt: number }).cnt
+
+  // Last activity = max of: lastLoginAt, latest ai_usage_logs.created_at,
+  // latest chat_sessions.created_at. All in unix seconds; null-safe.
+  const lastAiUsage = (db.prepare(
+    'SELECT max(created_at) AS ts FROM ai_usage_logs WHERE user_id = ?',
+  ).get(userId) as { ts: number | null }).ts
+  const lastChat = (db.prepare(
+    'SELECT max(created_at) AS ts FROM chat_sessions WHERE user_id = ?',
+  ).get(userId) as { ts: number | null }).ts
+
+  const candidates = [user.lastLoginAt, lastAiUsage, lastChat].filter((x): x is number => typeof x === 'number')
+  const lastActivityTs = candidates.length > 0 ? Math.max(...candidates) : null
+
   return {
     user: {
       ...user,
@@ -68,5 +100,19 @@ export default defineEventHandler(async (event) => {
       createdAt: new Date(w.createdAt * 1000).toISOString(),
     })),
     aiUsage,
+    quotas: quotasRow
+      ? {
+          maxDocs: quotasRow.maxDocs,
+          maxTokensMonth: quotasRow.maxTokensMonth,
+          maxWorkspaces: quotasRow.maxWorkspaces,
+        }
+      : null,
+    mcpTokens: {
+      active: Number(tokenStats?.active ?? 0),
+      revoked: Number(tokenStats?.revoked ?? 0),
+      total: Number(tokenStats?.total ?? 0),
+    },
+    decryptionFailures,
+    lastActivityAt: lastActivityTs != null ? new Date(lastActivityTs * 1000).toISOString() : null,
   }
 })

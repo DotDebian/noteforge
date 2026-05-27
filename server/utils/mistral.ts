@@ -24,14 +24,35 @@ function logMistralUsage(
   promptTokens: number,
   completionTokens: number,
   totalTokens: number,
+  success: boolean = true,
+  latencyMs?: number,
+  errorCode?: string,
 ): void {
-  if (!userId) return
+  // We still log unauthenticated calls when they FAIL so error rates surface
+  // in the admin panel; successful unauthenticated calls don't have a useful
+  // owner and are skipped.
+  if (!userId && success) return
   void Promise.resolve().then(async () => {
     try {
-      await useDb().insert(aiUsageLogs).values({ userId, model, operation, promptTokens, completionTokens, totalTokens })
+      await useDb().insert(aiUsageLogs).values({
+        userId: userId ?? null,
+        model,
+        operation,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        success,
+        latencyMs: latencyMs ?? null,
+        errorCode: errorCode ?? null,
+      })
     }
     catch { /* never surface logging errors */ }
   })
+}
+
+/** Map a fetch failure or non-2xx response to a short error code for logs. */
+function errorCodeFromStatus(status: number): string {
+  return `http_${status}`
 }
 
 const MISTRAL_API_BASE = 'https://api.mistral.ai/v1'
@@ -146,8 +167,10 @@ export interface MistralChatOptions {
 
 export async function mistralChat(opts: MistralChatOptions): Promise<{ content: string }> {
   const apiKey = getApiKey()
+  const model = getChatModel(opts.model)
+  const operation = opts.operation ?? 'chat'
   const body: Record<string, unknown> = {
-    model: getChatModel(opts.model),
+    model,
     messages: opts.messages,
     temperature: opts.temperature ?? 0.2,
   }
@@ -155,6 +178,7 @@ export async function mistralChat(opts: MistralChatOptions): Promise<{ content: 
     body.response_format = { type: 'json_object' }
   }
 
+  const start = Date.now()
   let res: Response
   try {
     res = await fetch(`${MISTRAL_API_BASE}/chat/completions`, {
@@ -168,6 +192,7 @@ export async function mistralChat(opts: MistralChatOptions): Promise<{ content: 
     })
   }
   catch (err) {
+    logMistralUsage(opts.userId, model, operation, 0, 0, 0, false, Date.now() - start, 'network')
     throw createError({
       statusCode: 502,
       statusMessage: 'mistral_failed',
@@ -177,6 +202,7 @@ export async function mistralChat(opts: MistralChatOptions): Promise<{ content: 
 
   if (!res.ok) {
     const detail = await readErrorDetail(res)
+    logMistralUsage(opts.userId, model, operation, 0, 0, 0, false, Date.now() - start, errorCodeFromStatus(res.status))
     throw createError({
       statusCode: 502,
       statusMessage: 'mistral_failed',
@@ -187,6 +213,7 @@ export async function mistralChat(opts: MistralChatOptions): Promise<{ content: 
   const json = (await res.json()) as MistralChatResponse
   const content = json.choices[0]?.message?.content
   if (typeof content !== 'string') {
+    logMistralUsage(opts.userId, model, operation, 0, 0, 0, false, Date.now() - start, 'empty_response')
     throw createError({
       statusCode: 502,
       statusMessage: 'mistral_failed',
@@ -194,9 +221,14 @@ export async function mistralChat(opts: MistralChatOptions): Promise<{ content: 
     })
   }
   markSuccess()
+  const latencyMs = Date.now() - start
   if (json.usage) {
-    logMistralUsage(opts.userId, getChatModel(opts.model), opts.operation ?? 'chat',
-      json.usage.prompt_tokens, json.usage.completion_tokens, json.usage.total_tokens)
+    logMistralUsage(opts.userId, model, operation,
+      json.usage.prompt_tokens, json.usage.completion_tokens, json.usage.total_tokens,
+      true, latencyMs)
+  }
+  else {
+    logMistralUsage(opts.userId, model, operation, 0, 0, 0, true, latencyMs)
   }
   return { content }
 }
@@ -221,14 +253,17 @@ export async function* mistralChatStream(
   opts: MistralStreamOptions,
 ): AsyncGenerator<string, void, unknown> {
   const apiKey = getApiKey()
+  const model = getChatModel(opts.model)
+  const operation = opts.operation ?? 'chat_stream'
   const body = {
-    model: getChatModel(opts.model),
+    model,
     messages: opts.messages,
     temperature: opts.temperature ?? 0.2,
     stream: true,
     stream_options: { include_usage: true },
   }
 
+  const start = Date.now()
   let res: Response
   try {
     res = await fetch(`${MISTRAL_API_BASE}/chat/completions`, {
@@ -242,6 +277,7 @@ export async function* mistralChatStream(
     })
   }
   catch (err) {
+    logMistralUsage(opts.userId, model, operation, 0, 0, 0, false, Date.now() - start, 'network')
     throw createError({
       statusCode: 502,
       statusMessage: 'mistral_failed',
@@ -251,6 +287,7 @@ export async function* mistralChatStream(
 
   if (!res.ok || !res.body) {
     const detail = res.body ? await readErrorDetail(res) : `HTTP ${res.status}`
+    logMistralUsage(opts.userId, model, operation, 0, 0, 0, false, Date.now() - start, errorCodeFromStatus(res.status))
     throw createError({
       statusCode: 502,
       statusMessage: 'mistral_failed',
@@ -288,9 +325,14 @@ export async function* mistralChatStream(
         const payload = dataLines.join('\n')
         if (payload === '[DONE]') {
           markSuccess()
+          const latencyMs = Date.now() - start
           if (capturedUsage) {
-            logMistralUsage(opts.userId, getChatModel(opts.model), opts.operation ?? 'chat_stream',
-              capturedUsage.prompt_tokens, capturedUsage.completion_tokens, capturedUsage.total_tokens)
+            logMistralUsage(opts.userId, model, operation,
+              capturedUsage.prompt_tokens, capturedUsage.completion_tokens, capturedUsage.total_tokens,
+              true, latencyMs)
+          }
+          else {
+            logMistralUsage(opts.userId, model, operation, 0, 0, 0, true, latencyMs)
           }
           return
         }
@@ -325,7 +367,10 @@ export async function mistralEmbed(
   if (inputs.length === 0) return []
   const apiKey = getApiKey()
   const embedOpts = typeof opts === 'string' ? { model: opts } : (opts ?? {})
+  const model = getEmbedModel(embedOpts.model)
+  const operation = embedOpts.operation ?? 'embed'
 
+  const start = Date.now()
   let res: Response
   try {
     res = await fetch(`${MISTRAL_API_BASE}/embeddings`, {
@@ -335,10 +380,11 @@ export async function mistralEmbed(
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
-      body: JSON.stringify({ model: getEmbedModel(embedOpts.model), input: inputs }),
+      body: JSON.stringify({ model, input: inputs }),
     })
   }
   catch (err) {
+    logMistralUsage(embedOpts.userId, model, operation, 0, 0, 0, false, Date.now() - start, 'network')
     throw createError({
       statusCode: 502,
       statusMessage: 'mistral_failed',
@@ -348,6 +394,7 @@ export async function mistralEmbed(
 
   if (!res.ok) {
     const detail = await readErrorDetail(res)
+    logMistralUsage(embedOpts.userId, model, operation, 0, 0, 0, false, Date.now() - start, errorCodeFromStatus(res.status))
     throw createError({
       statusCode: 502,
       statusMessage: 'mistral_failed',
@@ -369,9 +416,13 @@ export async function mistralEmbed(
     if (!out[i]) out[i] = []
   }
   markSuccess()
+  const latencyMs = Date.now() - start
   if (json.usage) {
-    logMistralUsage(embedOpts.userId, getEmbedModel(embedOpts.model), embedOpts.operation ?? 'embed',
-      json.usage.prompt_tokens, 0, json.usage.total_tokens)
+    logMistralUsage(embedOpts.userId, model, operation,
+      json.usage.prompt_tokens, 0, json.usage.total_tokens, true, latencyMs)
+  }
+  else {
+    logMistralUsage(embedOpts.userId, model, operation, 0, 0, 0, true, latencyMs)
   }
   return out
 }
@@ -521,12 +572,15 @@ export async function mistralFileSignedUrl(
 export async function mistralOcr(
   signedUrl: string,
   kind: 'document' | 'image' = 'document',
+  opts?: { userId?: number, operation?: string },
 ): Promise<{ markdown: string, pages: MistralOcrPage[] }> {
   const apiKey = getApiKey()
+  const operation = opts?.operation ?? 'ocr'
   const document = kind === 'image'
     ? { type: 'image_url' as const, image_url: signedUrl }
     : { type: 'document_url' as const, document_url: signedUrl }
 
+  const start = Date.now()
   let res: Response
   try {
     res = await fetch(`${MISTRAL_API_BASE}/ocr`, {
@@ -544,6 +598,7 @@ export async function mistralOcr(
     })
   }
   catch (err) {
+    logMistralUsage(opts?.userId, OCR_MODEL, operation, 0, 0, 0, false, Date.now() - start, 'network')
     throw createError({
       statusCode: 502,
       statusMessage: 'mistral_failed',
@@ -553,6 +608,7 @@ export async function mistralOcr(
 
   if (!res.ok) {
     const detail = await readErrorDetail(res)
+    logMistralUsage(opts?.userId, OCR_MODEL, operation, 0, 0, 0, false, Date.now() - start, errorCodeFromStatus(res.status))
     throw createError({
       statusCode: 502,
       statusMessage: 'mistral_failed',
@@ -569,5 +625,6 @@ export async function mistralOcr(
     .replace(/\n{3,}/g, '\n\n')
     .trim()
   markSuccess()
+  logMistralUsage(opts?.userId, OCR_MODEL, operation, 0, 0, 0, true, Date.now() - start)
   return { markdown, pages }
 }

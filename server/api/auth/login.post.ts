@@ -1,7 +1,7 @@
 import type { H3Event } from 'h3'
 import { z } from 'zod'
 import { eq } from 'drizzle-orm'
-import { createError, defineEventHandler, readValidatedBody, setHeader } from 'h3'
+import { createError, defineEventHandler, getRequestHeader, readValidatedBody, setHeader } from 'h3'
 import { useDb } from '~/server/database/client'
 import { users } from '~/server/database/schema'
 import { bcryptVerifyPassword, serializeUser } from '~/server/utils/auth'
@@ -10,6 +10,7 @@ import { dekToSessionValue } from '~/server/utils/dek'
 import { migrateUserToEncrypted } from '~/server/utils/encryption-migration'
 import { getClientIp } from '~/server/utils/rate-limit'
 import { consume, release } from '~/server/utils/rateLimit'
+import { logLoginAttempt } from '~/server/utils/loginAttempts'
 
 const Body = z.object({
   email: z.string().email().max(255),
@@ -38,30 +39,40 @@ export default defineEventHandler(async (event) => {
   const email = input.email.trim().toLowerCase()
 
   const ip = getClientIp(event)
+  const userAgent = getRequestHeader(event, 'user-agent') ?? undefined
   const ipKey = `auth:login:ip:${ip}`
   const emailKey = `auth:login:email:${email}`
 
   const ipCheck = consume(ipKey, IP_LIMIT, IP_WINDOW_MS)
-  if (!ipCheck.ok) refuse(event, ipCheck.retryAfterMs)
+  if (!ipCheck.ok) {
+    logLoginAttempt({ email, success: false, errorCode: 'rate_limited', ipAddress: ip, userAgent })
+    refuse(event, ipCheck.retryAfterMs)
+  }
 
   // The email bucket is reserved BEFORE the credential check; on a successful
   // login we release it so legitimate users don't burn their own allowance.
   const emailCheck = consume(emailKey, EMAIL_LIMIT, EMAIL_WINDOW_MS)
-  if (!emailCheck.ok) refuse(event, emailCheck.retryAfterMs)
+  if (!emailCheck.ok) {
+    logLoginAttempt({ email, success: false, errorCode: 'rate_limited', ipAddress: ip, userAgent })
+    refuse(event, emailCheck.retryAfterMs)
+  }
 
   const db = useDb()
   const [row] = await db.select().from(users).where(eq(users.email, email)).limit(1)
 
   if (!row) {
+    logLoginAttempt({ email, success: false, errorCode: 'unknown_user', ipAddress: ip, userAgent })
     throw createError({ statusCode: 401, statusMessage: 'Invalid credentials' })
   }
 
   const ok = await bcryptVerifyPassword(input.password, row.passwordHash)
   if (!ok) {
+    logLoginAttempt({ email, userId: row.id, success: false, errorCode: 'bad_password', ipAddress: ip, userAgent })
     throw createError({ statusCode: 401, statusMessage: 'Invalid credentials' })
   }
 
   if (row.disabledAt != null) {
+    logLoginAttempt({ email, userId: row.id, success: false, errorCode: 'disabled', ipAddress: ip, userAgent })
     throw createError({ statusCode: 403, statusMessage: 'Account disabled' })
   }
 
@@ -118,6 +129,8 @@ export default defineEventHandler(async (event) => {
     loggedInAt: Date.now(),
     dek: dekToSessionValue(dek),
   })
+
+  logLoginAttempt({ email, userId: row.id, success: true, ipAddress: ip, userAgent })
 
   return recoveryKey ? { user, recoveryKey } : { user }
 })

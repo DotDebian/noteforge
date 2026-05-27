@@ -5,11 +5,15 @@ definePageMeta({ layout: 'admin', middleware: 'admin' })
 
 interface DailyRow { day: string, model: string, promptTokens: number, completionTokens: number, totalTokens: number }
 interface ModelOpRow { model: string, operation: string, promptTokens: number, completionTokens: number, totalTokens: number }
-interface UserRow { id: number, email: string, displayName: string | null, totalTokens: number }
+interface UserRow { id: number, email: string, displayName: string | null, totalTokens: number, promptTokens: number, completionTokens: number }
+interface LatencyByModelRow { model: string, p50: number, p95: number, count: number }
+interface ErrorRateRow { model: string, total: number, errors: number, success: number, rate: number }
 interface UsageData {
   dailyRows: DailyRow[]
   byModelOp: ModelOpRow[]
   users: UserRow[]
+  latencyByModel: LatencyByModelRow[]
+  errorRateByModel: ErrorRateRow[]
 }
 
 // Mistral pricing (USD / M tokens) as of 2025
@@ -118,7 +122,55 @@ const totalByModel = computed(() => {
 
 const totalCostEur = computed(() => totalByModel.value.reduce((s, r) => s + r.costEur, 0))
 
+/* ---------- Reliability merge: join latency + error per model ---------- */
+const reliabilityByModel = computed(() => {
+  if (!data.value) return []
+  const map = new Map<string, { model: string, p50: number, p95: number, success: number, errors: number, total: number, rate: number }>()
+  for (const r of data.value.latencyByModel) {
+    map.set(r.model, {
+      model: r.model,
+      p50: r.p50,
+      p95: r.p95,
+      success: 0,
+      errors: 0,
+      total: 0,
+      rate: 0,
+    })
+  }
+  for (const r of data.value.errorRateByModel) {
+    const prev = map.get(r.model) ?? { model: r.model, p50: 0, p95: 0, success: 0, errors: 0, total: 0, rate: 0 }
+    map.set(r.model, {
+      ...prev,
+      success: r.success,
+      errors: r.errors,
+      total: r.total,
+      rate: r.rate,
+    })
+  }
+  return [...map.values()].sort((a, b) => b.total - a.total)
+})
+
+/* ---------- Per-user cost (joins users with PRICING) ---------- */
+const usersWithCost = computed(() => {
+  if (!data.value) return []
+  // We don't have a per-model breakdown per user in the response, so we
+  // estimate cost from the global mix-ratio between prompt/completion for
+  // this user. Falls back to an "average model" price weighted by the
+  // global byModel split.
+  const totalPrompt = totalByModel.value.reduce((s, m) => s + m.promptTokens, 0)
+  const totalCompletion = totalByModel.value.reduce((s, m) => s + m.completionTokens, 0)
+  const globalCost = totalByModel.value.reduce((s, m) => s + m.costEur, 0)
+  const tokensTotal = totalPrompt + totalCompletion
+  const eurPerToken = tokensTotal > 0 ? globalCost / tokensTotal : 0
+  return data.value.users.map(u => ({
+    ...u,
+    costByUserEur: (u.promptTokens + u.completionTokens) * eurPerToken,
+  }))
+})
+
 function fmtEur(n: number) { return n.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 4 }) }
+function fmtPct(n: number) { return `${(n * 100).toFixed(1)}%` }
+function fmtMs(n: number) { return `${n.toLocaleString('fr-FR')} ms` }
 </script>
 
 <template>
@@ -242,6 +294,65 @@ function fmtEur(n: number) { return n.toLocaleString('fr-FR', { style: 'currency
           </tbody>
         </table>
       </section>
+
+      <!-- Latency + reliability per model -->
+      <section class="section">
+        <h2 class="section-title">Latence et fiabilité</h2>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Modèle</th>
+              <th>p50</th>
+              <th>p95</th>
+              <th>Succès</th>
+              <th>Erreurs</th>
+              <th>Taux d'erreur</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in reliabilityByModel" :key="r.model">
+              <td class="mono">{{ r.model }}</td>
+              <td class="mono">{{ r.p50 > 0 ? fmtMs(r.p50) : '—' }}</td>
+              <td class="mono">{{ r.p95 > 0 ? fmtMs(r.p95) : '—' }}</td>
+              <td class="mono">{{ r.success.toLocaleString('fr-FR') }}</td>
+              <td class="mono" :class="{ 'cell-warn': r.errors > 0 }">{{ r.errors.toLocaleString('fr-FR') }}</td>
+              <td class="mono" :class="{ 'cell-warn': r.rate >= 0.05, 'cell-err': r.rate >= 0.2 }">
+                {{ r.total > 0 ? fmtPct(r.rate) : '—' }}
+              </td>
+            </tr>
+            <tr v-if="reliabilityByModel.length === 0">
+              <td colspan="6" class="empty-cell">Aucune donnée</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- Top users -->
+      <section class="section">
+        <h2 class="section-title">Top utilisateurs (tokens cumulés)</h2>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Utilisateur</th>
+              <th>Tokens</th>
+              <th>Coût estimé (€)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="u in usersWithCost" :key="u.id">
+              <td>
+                <span class="user-email">{{ u.email }}</span>
+                <span v-if="u.displayName" class="user-name">{{ u.displayName }}</span>
+              </td>
+              <td class="mono">{{ u.totalTokens.toLocaleString('fr-FR') }}</td>
+              <td class="mono">{{ fmtEur(u.costByUserEur) }}</td>
+            </tr>
+            <tr v-if="usersWithCost.length === 0">
+              <td colspan="3" class="empty-cell">Aucune donnée</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
     </template>
   </div>
 </template>
@@ -283,5 +394,9 @@ html.dark .cost-banner {
 .data-table td { @apply px-4 py-2.5 border-t border-ink-200/50 dark:border-ink-800/50 text-ink-700 dark:text-ink-300; background: theme('colors.ink.50'); }
 html.dark .data-table td { background: theme('colors.ink.900'); }
 .mono { @apply font-mono text-xs tabular-nums; }
+.cell-warn { @apply text-amber-600 dark:text-amber-400; }
+.cell-err { @apply text-red-600 dark:text-red-400 font-semibold; }
+.user-email { @apply block text-sm text-ink-800 dark:text-ink-200 font-medium; }
+.user-name { @apply block text-[11px] text-ink-500 dark:text-ink-400; }
 .empty-cell { @apply text-center py-8 text-sm text-ink-400 dark:text-ink-600; }
 </style>

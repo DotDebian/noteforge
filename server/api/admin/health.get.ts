@@ -36,10 +36,102 @@ export default defineEventHandler(async (event) => {
   }
   catch { /* path may differ in some envs */ }
 
+  /* ---------- MCP tokens breakdown ----------------------------------------- */
+  const mcpActive = (db.prepare(
+    'SELECT count(*) AS cnt FROM mcp_tokens WHERE revoked_at IS NULL',
+  ).get() as { cnt: number }).cnt
+  const mcpRevoked = (db.prepare(
+    'SELECT count(*) AS cnt FROM mcp_tokens WHERE revoked_at IS NOT NULL',
+  ).get() as { cnt: number }).cnt
+  const mcpNeverUsed = (db.prepare(
+    'SELECT count(*) AS cnt FROM mcp_tokens WHERE last_used_at IS NULL AND revoked_at IS NULL',
+  ).get() as { cnt: number }).cnt
+  const mcpTotal = mcpActive + mcpRevoked
+
+  /* ---------- Index drift (doc_chunks vs FTS5 vs vec0) --------------------- */
+  const docChunksCnt = (db.prepare('SELECT count(*) AS cnt FROM doc_chunks').get() as { cnt: number }).cnt
+
+  let ftsCnt = 0
+  try {
+    ftsCnt = (db.prepare('SELECT count(*) AS cnt FROM doc_chunks_fts').get() as { cnt: number }).cnt
+  }
+  catch { /* table missing — leave at 0 (treated as drift) */ }
+
+  let vecCnt: number | null = null
+  try {
+    vecCnt = (db.prepare('SELECT count(*) AS cnt FROM doc_chunks_vec').get() as { cnt: number }).cnt
+  }
+  catch { /* vec extension unavailable in this env */ }
+
+  const hasDrift
+    = docChunksCnt !== ftsCnt
+    || (vecCnt !== null && vecCnt !== docChunksCnt)
+
+  /* ---------- Trash size --------------------------------------------------- */
+  const trashDocs = (db.prepare(
+    'SELECT count(*) AS cnt FROM documents WHERE deleted_at IS NOT NULL',
+  ).get() as { cnt: number }).cnt
+  const trashFolders = (db.prepare(
+    'SELECT count(*) AS cnt FROM folders WHERE deleted_at IS NOT NULL',
+  ).get() as { cnt: number }).cnt
+  const trashBytesRow = db.prepare(
+    'SELECT COALESCE(SUM(LENGTH(markdown)), 0) AS bytes FROM documents WHERE deleted_at IS NOT NULL',
+  ).get() as { bytes: number }
+  const trashMarkdownBytes = trashBytesRow.bytes ?? 0
+
+  /* ---------- DB growth — last 30 snapshots -------------------------------- */
+  const snapshotRows = db.prepare(
+    `SELECT date(created_at, 'unixepoch') AS day, db_size_bytes AS sizeBytes, created_at AS ts
+       FROM health_snapshots
+      WHERE created_at >= unixepoch('now', '-30 days')
+      ORDER BY created_at ASC`,
+  ).all() as Array<{ day: string, sizeBytes: number, ts: number }>
+
+  const snapshots = snapshotRows.map(r => ({ day: r.day, sizeBytes: r.sizeBytes }))
+  const currentBytes = snapshots.length > 0
+    ? snapshots[snapshots.length - 1]!.sizeBytes
+    : dbFileSizeBytes
+
+  // delta vs 7 days ago — closest snapshot at-or-before the cutoff
+  let delta7d = 0
+  let deltaPct7d = 0
+  if (snapshots.length > 0) {
+    const cutoff = Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60
+    const baseline = [...snapshotRows].reverse().find(r => r.ts <= cutoff)
+      ?? snapshotRows[0]!
+    delta7d = currentBytes - baseline.sizeBytes
+    deltaPct7d = baseline.sizeBytes > 0
+      ? (delta7d / baseline.sizeBytes) * 100
+      : 0
+  }
+
   return {
     dbFileSizeBytes,
     tableCounts,
     lastEmbedAt: lastEmbedRow.ts ? new Date(lastEmbedRow.ts * 1000).toISOString() : null,
     unindexedDocCount: unindexedRow.cnt,
+    mcpTokens: {
+      active: mcpActive,
+      revoked: mcpRevoked,
+      neverUsed: mcpNeverUsed,
+      total: mcpTotal,
+    },
+    indexDrift: {
+      docChunks: docChunksCnt,
+      fts: ftsCnt,
+      vec: vecCnt,
+      hasDrift,
+    },
+    trash: {
+      docs: trashDocs,
+      folders: trashFolders,
+      markdownBytes: trashMarkdownBytes,
+    },
+    dbGrowth: {
+      snapshots,
+      currentBytes,
+      delta7d,
+      deltaPct7d,
+    },
   }
 })

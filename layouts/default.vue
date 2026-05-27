@@ -27,6 +27,32 @@ const mobileSidebar = useMobileSidebar()
 const { isOpen: mobileSidebarOpen } = mobileSidebar
 const { t } = useLocale()
 
+/**
+ * Impersonation banner: when an admin uses `POST /api/admin/users/:id/impersonate`
+ * the server stamps `originalAdminId` + `impersonating` onto the session. We
+ * surface that here as a banner with an exit button. The DEK is intentionally
+ * absent in this mode so encrypted content (notes, chunks, chats) renders as
+ * ciphertext — the banner explains the limitation implicitly via its presence.
+ */
+const session = useUserSession()
+const impersonationActive = computed(() => Boolean(session.session.value?.originalAdminId))
+const impersonationLabel = computed(() => session.user.value?.email ?? '')
+const exitingImpersonation = ref(false)
+async function exitImpersonation() {
+  if (exitingImpersonation.value) return
+  exitingImpersonation.value = true
+  try {
+    const currentId = session.user.value?.id
+    const target = currentId ?? 0
+    await $fetch(`/api/admin/users/${target}/stop-impersonate`, { method: 'POST' })
+    window.location.href = '/admin/users'
+  }
+  catch {
+    exitingImpersonation.value = false
+    window.location.reload()
+  }
+}
+
 // Auto-close the mobile drawer on route change so navigating from a doc
 // in the sidebar dismisses the overlay.
 watch(() => route.fullPath, () => mobileSidebar.close())
@@ -108,8 +134,26 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
 <template>
   <div
     class="app-shell"
-    :class="{ 'focus-mode': isFocus, 'mobile-sidebar-open': mobileSidebarOpen }"
+    :class="{ 'focus-mode': isFocus, 'mobile-sidebar-open': mobileSidebarOpen, 'impersonating': impersonationActive }"
   >
+    <!-- Impersonation banner — pinned to the top of the viewport when the
+         admin is currently acting as another user. The DEK isn't available
+         in this mode so encrypted content (notes, chunks, chats) renders as
+         ciphertext; the banner signals the limitation and offers an exit. -->
+    <div v-if="impersonationActive" class="impersonation-banner" role="status" aria-live="polite">
+      <span class="impersonation-label">
+        Connecté en tant que <strong>{{ impersonationLabel }}</strong> — le contenu chiffré est inaccessible.
+      </span>
+      <button
+        type="button"
+        class="impersonation-exit"
+        :disabled="exitingImpersonation"
+        @click="exitImpersonation"
+      >
+        {{ exitingImpersonation ? 'Sortie…' : 'Quitter l’impersonation' }}
+      </button>
+    </div>
+
     <!-- Mobile top bar: hamburger + title. Visible only below md. Hidden in
          focus mode to keep the writer's view clean — the command palette
          (Ctrl/Cmd+K) is the keyboard escape hatch. -->
@@ -182,6 +226,31 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
 .app-shell {
   @apply h-full w-full flex bg-ink-50 dark:bg-ink-950;
 }
+
+/* Impersonation banner — fixed at the top of the viewport so it stays
+   visible across the sidebar + main column. The shell stays flex-row; the
+   banner overlays. Adds a top padding to `.app-main` via the
+   `.impersonating` shell class so content isn't hidden beneath it. */
+.impersonation-banner {
+  @apply fixed top-0 inset-x-0 z-[60] flex items-center justify-center gap-4 px-4 py-2 text-sm;
+  background: theme('colors.accent.600');
+  color: theme('colors.ink.50');
+  box-shadow: 0 1px 0 theme('colors.accent.700');
+}
+.impersonation-label { @apply font-sans text-[13px]; }
+.impersonation-label strong { @apply font-semibold; }
+.impersonation-exit {
+  @apply font-sans text-[11px] uppercase tracking-[0.08em] font-semibold px-3 py-1 rounded border;
+  background: theme('colors.ink.50' / 10%);
+  border-color: theme('colors.ink.50' / 30%);
+  color: theme('colors.ink.50');
+  transition: background 100ms;
+}
+.impersonation-exit:hover:not(:disabled) {
+  background: theme('colors.ink.50' / 25%);
+}
+.impersonation-exit:disabled { @apply opacity-60 cursor-not-allowed; }
+.app-shell.impersonating { padding-top: 40px; }
 
 .app-main {
   @apply flex-1 min-w-0 overflow-auto;

@@ -30,6 +30,7 @@ import {
 } from '~/server/utils/search'
 import { rerankChunks } from '~/server/utils/rerank'
 import { rewriteQuery } from '~/server/utils/query-rewrite'
+import { logRagQuality } from '~/server/utils/ragQuality'
 
 /* -------------------------------------------------------------------------- */
 /*  Tunables                                                                   */
@@ -95,6 +96,7 @@ function sseFrame(payload: unknown): string {
 /* -------------------------------------------------------------------------- */
 
 export default defineEventHandler(async (event) => {
+  const requestStart = Date.now()
   const user = await requireUser(event)
   const dek = await getDek(event)
   applyRateLimit(event, user.id, 'chat')
@@ -189,6 +191,9 @@ export default defineEventHandler(async (event) => {
   // The rewriter resolves pronouns / anaphora against prior turns so the
   // embedding step doesn't blow on follow-ups like "et le second point ?".
   // Failures fall back to the original message inside the helper.
+  // The rewriter only spends a Mistral call when there's prior history —
+  // first-turn calls return the original message verbatim.
+  const rewriterUsed = historyMessages.length > 0
   const retrievalQuery = await rewriteQuery(historyMessages, input.message, user.id)
 
   /* ---------- 5. Retrieve context ---------------------------------------- */
@@ -223,6 +228,8 @@ export default defineEventHandler(async (event) => {
   const candidateDocIds = candidateDocs.map(d => d.id)
 
   const sources: SourceRef[] = []
+  let rerankerUsed = false
+  let rerankScoreAvg: number | undefined
   if (candidateDocIds.length > 0) {
     // Hybrid first stage (vec + FTS5, RRF-fused). Oversampled to RERANK_POOL
     // with NO per-doc cap so the reranker has diverse material to work with.
@@ -236,7 +243,13 @@ export default defineEventHandler(async (event) => {
     // Second stage: Mistral reranker. Reorders the pool against the rewritten
     // query and keeps roughly 2× SEARCH_TOP_K so the per-doc cap below has
     // something to pick from.
+    rerankerUsed = scored.length > 1
     const reranked = await rerankChunks(retrievalQuery, scored, SEARCH_TOP_K * 2, user.id)
+    if (reranked.length > 0) {
+      let sum = 0
+      for (const r of reranked) sum += r.score
+      rerankScoreAvg = sum / reranked.length
+    }
 
     // Apply the per-doc cap (workspace mode only) and trim to SEARCH_TOP_K.
     const finalCap = effectiveDocId != null ? Number.POSITIVE_INFINITY : 2
@@ -369,6 +382,19 @@ export default defineEventHandler(async (event) => {
           sources: refinedForClient,
         })
       }
+
+      logRagQuality({
+        sessionId: finalSessionId,
+        userId: user.id,
+        chunksReturned: sources.length,
+        rerankScoreAvg,
+        citationsEmitted: refinedForClient.length,
+        hasCitation: refinedForClient.length > 0,
+        rewriterUsed,
+        rerankerUsed,
+        latencyMs: Date.now() - requestStart,
+      })
+
       controller.close()
     },
   })

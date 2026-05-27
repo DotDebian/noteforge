@@ -244,18 +244,60 @@ export function encryptField(plaintext: string, dek: Buffer | null | undefined):
 }
 
 /**
+ * Optional metadata callers may attach when decrypting a field, so failure
+ * paths can record which entity/field tripped them in
+ * `decryption_failures`. Purely advisory — `decryptField` works without it.
+ */
+export interface DecryptFieldContext {
+  userId?: number
+  entityType?: string
+  entityId?: number
+  field?: string
+}
+
+/**
  * Decrypt a string field. If the value isn't in envelope form, returns it
  * unchanged (plaintext / legacy). If `dek` is null, returns the input
  * unchanged too — used during the migration window. Throws only on a
  * tampered/corrupt envelope.
+ *
+ * When `ctx` is supplied AND decryption fails, the error is logged to
+ * `decryption_failures` (fire-and-forget) before being re-thrown. We import
+ * the logger lazily so this module stays free of DB deps at module-init
+ * time (`useDb()` would otherwise load on first import).
  */
-export function decryptField(value: string | null | undefined, dek: Buffer | null | undefined): string {
+export function decryptField(
+  value: string | null | undefined,
+  dek: Buffer | null | undefined,
+  ctx?: DecryptFieldContext,
+): string {
   if (value == null) return ''
   if (!isEncrypted(value)) return value
   if (!dek) return value // can't decrypt without DEK — return raw envelope (caller surfaces an error)
-  const blob = Buffer.from(value.slice(ENVELOPE_PREFIX.length), 'base64url')
-  const plain = unwrap(blob, dek)
-  return plain.toString('utf-8')
+  try {
+    const blob = Buffer.from(value.slice(ENVELOPE_PREFIX.length), 'base64url')
+    const plain = unwrap(blob, dek)
+    return plain.toString('utf-8')
+  }
+  catch (err) {
+    if (ctx) {
+      // Lazy import to keep crypto.ts free of database imports at load.
+      // The logger is fire-and-forget so even if THIS import fails (e.g.
+      // during very early bootstrap) we still re-throw the original error.
+      void import('./decryptionFailures')
+        .then(({ logDecryptionFailure }) => {
+          logDecryptionFailure({
+            userId: ctx.userId,
+            entityType: ctx.entityType ?? 'unknown',
+            entityId: ctx.entityId,
+            field: ctx.field ?? 'unknown',
+            errorMessage: (err as Error).message,
+          })
+        })
+        .catch(() => { /* swallow */ })
+    }
+    throw err
+  }
 }
 
 /** Convenience: decrypt a JSON-serialised field, returning the parsed value. */
