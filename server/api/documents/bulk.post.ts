@@ -32,11 +32,11 @@ import {
   encryptAnalysis,
 } from '~/server/utils/encrypted-entities'
 import { buildHtml, slugify } from '~/server/utils/export'
-import { softDeleteUserDocument, updateUserDocument } from '~/server/utils/notes'
+import { analyzeUserDocument, softDeleteUserDocument, updateUserDocument } from '~/server/utils/notes'
 import { requireUser } from '~/server/utils/require-user'
 
 const Body = z.object({
-  action: z.enum(['move', 'trash', 'tag-add', 'tag-remove', 'export']),
+  action: z.enum(['move', 'trash', 'tag-add', 'tag-remove', 'export', 'analyze']),
   docIds: z.array(z.number().int().positive()).min(1).max(500),
   folderId: z.number().int().positive().nullable().optional(),
   tag: z.string().trim().min(1).max(80).optional(),
@@ -222,6 +222,21 @@ export default defineEventHandler(async (event) => {
           .update(docAnalyses)
           .set({ tags: nextEncrypted })
           .where(eq(docAnalyses.docId, id))
+        result.ok.push(id)
+      }
+      catch (err) {
+        result.errors.push({ docId: id, message: (err as Error).message || 'failed' })
+      }
+    }
+    return result
+  }
+
+  /* -------- action: analyze -------- */
+  if (input.action === 'analyze') {
+    const result: BulkResult = { ok: [], errors: [] }
+    for (const id of ids) {
+      try {
+        await analyzeUserDocument(user.id, id, dek)
         result.ok.push(id)
       }
       catch (err) {

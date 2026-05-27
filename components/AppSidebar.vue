@@ -54,6 +54,10 @@ const L = {
   bulkTag: 'Tag +',
   bulkUntag: 'Tag -',
   bulkExport: 'Exporter ZIP',
+  bulkAnalyze: 'Analyser & indexer',
+  analyzeConfirmTitle: (n: number) => `Réanalyser ${n} note${n > 1 ? 's' : ''} ?`,
+  analyzeConfirmBody: 'NoteForge va contacter Mistral pour chaque note sélectionnée (analyse + réindexation). Cela peut prendre plusieurs dizaines de secondes.',
+  analyzeConfirmYes: 'Réanalyser',
   movePromptTitle: 'Déplacer vers…',
   movePromptMessage: 'Entrez l\'ID du dossier ou « racine » pour la racine.',
   movePromptPlaceholder: 'ex. 12 · racine',
@@ -268,6 +272,37 @@ async function onBulkTagRemove() {
         tag,
       },
     })
+    bulkSelect.exit()
+  }
+  catch (err) {
+    await dialog.alert({ title: L.bulkError, message: (err as Error).message })
+  }
+}
+
+async function onBulkAnalyze() {
+  if (!current.value) return
+  const n = bulkSelect.docCount
+  if (n === 0) return
+  const ok = await dialog.confirm({
+    title: L.analyzeConfirmTitle(n),
+    message: L.analyzeConfirmBody,
+    confirmLabel: L.analyzeConfirmYes,
+  })
+  if (!ok) return
+  try {
+    const res = await $fetch<BulkResult>('/api/documents/bulk', {
+      method: 'POST',
+      body: {
+        action: 'analyze',
+        docIds: [...bulkSelect.selectedDocs],
+      },
+    })
+    if (res.errors.length > 0) {
+      await dialog.alert({
+        title: L.bulkError,
+        message: `${res.ok.length} note${res.ok.length > 1 ? 's' : ''} analysée${res.ok.length > 1 ? 's' : ''}. ${res.errors.length} échouée${res.errors.length > 1 ? 's' : ''}.`,
+      })
+    }
     bulkSelect.exit()
   }
   catch (err) {
@@ -875,6 +910,7 @@ async function onRootDocDrop(e: DragEvent) {
         <button type="button" class="bulk-btn" :disabled="bulkSelect.docCount === 0" @click="onBulkMove">{{ L.bulkMove }}</button>
         <button type="button" class="bulk-btn" :disabled="bulkSelect.docCount === 0" @click="onBulkTagAdd">{{ L.bulkTag }}</button>
         <button type="button" class="bulk-btn" :disabled="bulkSelect.docCount === 0" @click="onBulkTagRemove">{{ L.bulkUntag }}</button>
+        <button type="button" class="bulk-btn" :disabled="bulkSelect.docCount === 0" @click="onBulkAnalyze">{{ L.bulkAnalyze }}</button>
         <button type="button" class="bulk-btn" :disabled="bulkSelect.docCount === 0" @click="onBulkExport">{{ L.bulkExport }}</button>
         <button type="button" class="bulk-btn bulk-btn--danger" :disabled="bulkSelect.docCount === 0" @click="onBulkTrash">{{ L.bulkTrash }}</button>
       </div>
