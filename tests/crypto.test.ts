@@ -16,9 +16,13 @@ import {
   generateDek,
   generateRecoveryKey,
   generateSalt,
+  generateUserKeyPair,
+  generateWek,
   hashRecoveryKey,
   isEncrypted,
   normaliseRecoveryKey,
+  openSealed,
+  sealForPublicKey,
   unwrap,
   wrap,
 } from '../server/utils/crypto'
@@ -121,5 +125,43 @@ describe('recovery key', () => {
     expect(a).toBe(b)
     expect(a).not.toBe(c)
     expect(a).toHaveLength(64) // SHA-256 hex
+  })
+})
+
+describe('X25519 sealed box (workspace sharing)', () => {
+  it('round-trips a payload through generate → seal → open', () => {
+    const recipient = generateUserKeyPair()
+    const wek = generateWek()
+    const sealed = sealForPublicKey(wek, recipient.publicKey)
+    const opened = openSealed(sealed, recipient.privateKey, recipient.publicKey)
+    expect(opened.equals(wek)).toBe(true)
+  })
+
+  it('fails when opened with the wrong recipient key', () => {
+    const alice = generateUserKeyPair()
+    const eve = generateUserKeyPair()
+    const wek = generateWek()
+    const sealed = sealForPublicKey(wek, alice.publicKey)
+    // Eve's private key can't open a box sealed for Alice — AES-GCM tag mismatch.
+    expect(() => openSealed(sealed, eve.privateKey, alice.publicKey)).toThrow()
+  })
+
+  it('rejects tampered sealed payloads', () => {
+    const kp = generateUserKeyPair()
+    const sealed = Buffer.from(sealForPublicKey(generateWek(), kp.publicKey))
+    // Flip a single byte in the ciphertext region (after ephemeralPub + iv + tag).
+    sealed[sealed.byteLength - 1] = sealed[sealed.byteLength - 1] ^ 0x01
+    expect(() => openSealed(sealed, kp.privateKey, kp.publicKey)).toThrow()
+  })
+
+  it('each seal uses a fresh ephemeral key', () => {
+    const kp = generateUserKeyPair()
+    const wek = generateWek()
+    const a = sealForPublicKey(wek, kp.publicKey)
+    const b = sealForPublicKey(wek, kp.publicKey)
+    // First 32 bytes are the ephemeral public key — should differ.
+    expect(a.subarray(0, 32).equals(b.subarray(0, 32))).toBe(false)
+    expect(openSealed(a, kp.privateKey, kp.publicKey).equals(wek)).toBe(true)
+    expect(openSealed(b, kp.privateKey, kp.publicKey).equals(wek)).toBe(true)
   })
 })

@@ -29,14 +29,21 @@ import {
   documentVersions,
   folders,
   workspaces,
+  workspaceShares,
   type DocAnalysis,
   type Document,
   type Folder,
   type Workspace,
+  type WorkspaceRole,
 } from '~/server/database/schema'
+import { getWorkspaceKeyForUser } from './workspace-key'
 import {
+  assertCanEdit,
+  assertDocumentMembership,
   assertDocumentOwnership,
+  assertFolderMembership,
   assertFolderOwnership,
+  assertWorkspaceMembership,
   assertWorkspaceOwnership,
 } from './access'
 import { activeDocsWhere, activeFoldersWhere } from './active'
@@ -74,14 +81,85 @@ import {
 /*  Workspaces                                                                 */
 /* ========================================================================== */
 
-export async function listUserWorkspaces(userId: number, dek: Buffer | null = null): Promise<Workspace[]> {
+export interface WorkspaceListItem extends Workspace {
+  /** Caller's role on this workspace — `'owner'` for solo + owned-shared, `'editor'`/`'viewer'` for invited members. */
+  role: WorkspaceRole
+  /** True when the workspace is shared with at least one other user. */
+  shared: boolean
+}
+
+/**
+ * List every workspace the user has access to (owned + shared). Each row
+ * decrypts under its own key:
+ *  - solo workspaces (mode `'dek'`): the caller is the owner, so its
+ *    name is encrypted under their DEK.
+ *  - shared workspaces (mode `'wek'`): unseal the WEK from the caller's
+ *    `workspace_shares` row, then decrypt the name with it.
+ *
+ * Without a DEK on the session (legacy/pre-encryption), we fall through
+ * `decryptWorkspace` unchanged.
+ */
+export async function listUserWorkspaces(userId: number, dek: Buffer | null = null): Promise<WorkspaceListItem[]> {
   const db = useDb()
-  const rows = await db
+  const owned = await db
     .select()
     .from(workspaces)
     .where(eq(workspaces.ownerId, userId))
     .orderBy(desc(workspaces.createdAt))
-  return rows.map(w => decryptWorkspace(w, dek))
+
+  const sharedRows = await db
+    .select({ workspace: workspaces, role: workspaceShares.role })
+    .from(workspaceShares)
+    .innerJoin(workspaces, eq(workspaces.id, workspaceShares.workspaceId))
+    .where(eq(workspaceShares.userId, userId))
+    .orderBy(desc(workspaces.createdAt))
+
+  // Owner of a shared workspace appears in BOTH lists — dedupe by id.
+  // Prefer the `workspace_shares` row for the role (always `'owner'` for
+  // owners of upgraded workspaces; keeps the lookup uniform).
+  const byId = new Map<number, { workspace: Workspace, role: WorkspaceRole }>()
+  for (const w of owned) byId.set(w.id, { workspace: w, role: 'owner' })
+  for (const s of sharedRows) byId.set(s.workspace.id, { workspace: s.workspace, role: s.role })
+
+  // Which `'wek'` workspaces have more than one member — used to flag the
+  // `shared` indicator in the UI without an N+1.
+  const wekIds = [...byId.values()].filter(v => v.workspace.encryptionMode === 'wek').map(v => v.workspace.id)
+  const memberCounts = wekIds.length > 0
+    ? await db
+      .select({ workspaceId: workspaceShares.workspaceId, n: sql<number>`count(*)`.mapWith(Number) })
+      .from(workspaceShares)
+      .where(inArray(workspaceShares.workspaceId, wekIds))
+      .groupBy(workspaceShares.workspaceId)
+    : []
+  const memberCountByWs = new Map(memberCounts.map(m => [m.workspaceId, m.n]))
+
+  const keyCache = {}
+  const out: WorkspaceListItem[] = []
+  for (const { workspace, role } of byId.values()) {
+    let key: Buffer | null = dek
+    if (dek && workspace.encryptionMode === 'wek') {
+      try {
+        key = await getWorkspaceKeyForUser({ workspace, userId, dek, cache: keyCache })
+      }
+      catch (err) {
+        console.error('[notes/listUserWorkspaces] WEK resolve failed for', workspace.id, err)
+        key = null
+      }
+    }
+    const decrypted = decryptWorkspace(workspace, key)
+    out.push({
+      ...decrypted,
+      role,
+      shared: (memberCountByWs.get(workspace.id) ?? 0) > 1,
+    })
+  }
+  // Stable order: newest first.
+  out.sort((a, b) => {
+    const ta = a.createdAt instanceof Date ? a.createdAt.getTime() : new Date(a.createdAt as unknown as string).getTime()
+    const tb = b.createdAt instanceof Date ? b.createdAt.getTime() : new Date(b.createdAt as unknown as string).getTime()
+    return tb - ta
+  })
+  return out
 }
 
 export interface WorkspaceDetail {
@@ -234,7 +312,8 @@ export async function createUserDocument(
   input: CreateDocumentInput,
   dek: Buffer | null = null,
 ): Promise<Document> {
-  const workspace = await assertWorkspaceOwnership(userId, input.workspaceId)
+  const { workspace, role } = await assertWorkspaceMembership(userId, input.workspaceId)
+  assertCanEdit(role)
 
   if (input.folderId != null) {
     const folder = await assertFolderOwnership(userId, input.folderId)
@@ -309,7 +388,8 @@ export async function updateUserDocument(
   input: UpdateDocumentInput,
   dek: Buffer | null = null,
 ): Promise<Document> {
-  const doc = await assertDocumentOwnership(userId, docId)
+  const { document: doc, role } = await assertDocumentMembership(userId, docId)
+  assertCanEdit(role)
   if (doc.deletedAt != null) {
     throw createError({ statusCode: 400, statusMessage: 'Document is in trash' })
   }
@@ -438,7 +518,8 @@ export async function softDeleteUserDocument(
   userId: number,
   docId: number,
 ): Promise<{ ok: true, deletedAt: Date }> {
-  const doc = await assertDocumentOwnership(userId, docId)
+  const { document: doc, role } = await assertDocumentMembership(userId, docId)
+  assertCanEdit(role)
   if (doc.deletedAt != null) {
     return { ok: true, deletedAt: doc.deletedAt }
   }
@@ -472,7 +553,8 @@ export async function createUserFolder(
   input: CreateFolderInput,
   dek: Buffer | null = null,
 ): Promise<Folder> {
-  const workspace = await assertWorkspaceOwnership(userId, input.workspaceId)
+  const { workspace, role } = await assertWorkspaceMembership(userId, input.workspaceId)
+  assertCanEdit(role)
 
   if (input.parentId != null) {
     const parent = await assertFolderOwnership(userId, input.parentId)
@@ -514,7 +596,8 @@ export async function updateUserFolder(
   input: UpdateFolderInput,
   dek: Buffer | null = null,
 ): Promise<Folder> {
-  const folder = await assertFolderOwnership(userId, folderId)
+  const { folder, role } = await assertFolderMembership(userId, folderId)
+  assertCanEdit(role)
 
   if (input.parentId !== undefined && input.position !== undefined) {
     throw createError({
@@ -593,7 +676,8 @@ export async function softDeleteUserFolder(
   userId: number,
   folderId: number,
 ): Promise<{ ok: true, deletedAt: Date }> {
-  const folder = await assertFolderOwnership(userId, folderId)
+  const { folder, role } = await assertFolderMembership(userId, folderId)
+  assertCanEdit(role)
   if (folder.deletedAt != null) {
     return { ok: true, deletedAt: folder.deletedAt }
   }
@@ -808,7 +892,9 @@ export async function analyzeUserDocument(
   docId: number,
   dek: Buffer | null = null,
 ): Promise<DocAnalysis> {
-  const doc = decryptDocument(await assertDocumentOwnership(userId, docId), dek)
+  const { document: rawDoc, role } = await assertDocumentMembership(userId, docId)
+  assertCanEdit(role)
+  const doc = decryptDocument(rawDoc, dek)
   if (doc.deletedAt != null) {
     throw createError({ statusCode: 400, statusMessage: 'Document is in trash' })
   }

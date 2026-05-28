@@ -14,6 +14,7 @@ import { useSavedSearchesStore, type SavedSearchRow } from '~/stores/savedSearch
 import { useBulkSelectStore } from '~/stores/bulkSelect'
 
 const mcpOpen = ref(false)
+const shareOpen = ref(false)
 
 defineProps<{ collapsed?: boolean }>()
 const emit = defineEmits<{
@@ -646,7 +647,25 @@ async function onRootDocDrop(e: DragEvent) {
     <div v-if="!collapsed" class="sidebar-body">
       <!-- Workspace switcher -->
       <section class="block">
-        <div class="block-label">{{ t('sidebar.workspace') }}</div>
+        <div class="block-header">
+          <span class="block-label">{{ t('sidebar.workspace') }}</span>
+          <button
+            v-if="current"
+            type="button"
+            class="icon-btn share-btn"
+            :class="{ 'share-btn--shared': current.shared, 'share-btn--guest': current.role !== 'owner' }"
+            :title="current.role === 'owner' ? 'Partager le workspace' : 'Voir les membres'"
+            @click="shareOpen = true"
+          >
+            <!-- Two-people glyph — share affordance. -->
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+              <circle cx="5.5" cy="6" r="2" fill="none" stroke="currentColor" stroke-width="1.2" />
+              <path d="M1.5 13.5c0-2.2 1.8-3.5 4-3.5s4 1.3 4 3.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+              <circle cx="11" cy="5.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.2" />
+              <path d="M14.5 12.5c0-1.6-1.4-2.7-3.5-2.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
         <WorkspaceSwitcher
           :workspaces="workspaces"
           :current="current"
@@ -1031,6 +1050,13 @@ async function onRootDocDrop(e: DragEvent) {
     </footer>
 
     <McpTokensDialog :is-open="mcpOpen" @close="mcpOpen = false" />
+    <ShareWorkspaceDialog
+      :is-open="shareOpen"
+      :workspace-id="current?.id ?? null"
+      :workspace-name="current?.name ?? ''"
+      :is-owner="current?.role === 'owner'"
+      @close="shareOpen = false"
+    />
   </aside>
 </template>
 
@@ -1338,6 +1364,29 @@ html.dark .saved-action--danger:hover { color: theme('colors.accent.300'); }
 .icon-btn--active:hover {
   background: theme('colors.accent.600');
   color: white;
+}
+
+/* Workspace share button — accent dot when the workspace already has
+   members, dimmer styling for read-only members. */
+.share-btn--shared {
+  position: relative;
+}
+.share-btn--shared::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: theme('colors.accent.500');
+  border: 1px solid theme('colors.ink.50');
+}
+html.dark .share-btn--shared::after {
+  border-color: theme('colors.ink.900');
+}
+.share-btn--guest {
+  opacity: 0.7;
 }
 .bulk-checkbox {
   @apply h-3.5 w-3.5 shrink-0 accent-accent-500 cursor-pointer;

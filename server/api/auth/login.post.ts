@@ -5,7 +5,7 @@ import { createError, defineEventHandler, getRequestHeader, readValidatedBody, s
 import { useDb } from '~/server/database/client'
 import { users } from '~/server/database/schema'
 import { bcryptVerifyPassword, serializeUser } from '~/server/utils/auth'
-import { deriveKdk, unwrap } from '~/server/utils/crypto'
+import { deriveKdk, generateUserKeyPair, unwrap, wrap } from '~/server/utils/crypto'
 import { dekToSessionValue } from '~/server/utils/dek'
 import { migrateUserToEncrypted } from '~/server/utils/encryption-migration'
 import { getClientIp } from '~/server/utils/rate-limit'
@@ -102,6 +102,27 @@ export default defineEventHandler(async (event) => {
         statusCode: 500,
         statusMessage: 'Could not unlock account data',
       })
+    }
+
+    // Lazy keypair backfill — pre-share-rollout users get an X25519 pair
+    // generated and wrapped under their DEK on first login. The keypair is
+    // required to receive a shared workspace; doing it here keeps the
+    // share endpoint simple (it can refuse "no public key" with a clear
+    // error and trust the next login to fix it).
+    if (!row.publicKey || !row.wrappedPrivateKey) {
+      try {
+        const kp = generateUserKeyPair()
+        const wrappedPrivateKey = wrap(kp.privateKey, dek)
+        await db
+          .update(users)
+          .set({ publicKey: kp.publicKey, wrappedPrivateKey })
+          .where(eq(users.id, row.id))
+      }
+      catch (err) {
+        // Non-fatal — the user can still use the app, they just can't
+        // receive a share until this succeeds on a later login.
+        console.error('[auth/login] keypair backfill failed for', row.id, err)
+      }
     }
   }
   else {

@@ -1,8 +1,8 @@
 import { z } from 'zod'
 import { defineEventHandler, getValidatedQuery } from 'h3'
-import { getDek } from '~/server/utils/dek'
 import { isDailyNoteTitle, listUserDocuments } from '~/server/utils/notes'
 import { requireUser } from '~/server/utils/require-user'
+import { getWorkspaceKey } from '~/server/utils/workspace-key'
 
 const Query = z.object({
   workspaceId: z.coerce.number().int().positive(),
@@ -18,10 +18,10 @@ const Query = z.object({
 export default defineEventHandler(async (event) => {
   const q = await getValidatedQuery(event, Query.parse)
   const user = await requireUser(event)
-  const dek = await getDek(event)
+  const key = await getWorkspaceKey(event, q.workspaceId)
   const documents = await listUserDocuments(user.id, q.workspaceId, {
     folderId: q.folderId,
-  }, dek)
+  }, key)
   const filtered = q.includeJournal
     ? documents
     : documents.filter(d => !isDailyNoteTitle(d.title))

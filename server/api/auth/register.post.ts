@@ -11,6 +11,7 @@ import {
   generateDek,
   generateRecoveryKey,
   generateSalt,
+  generateUserKeyPair,
   hashRecoveryKey,
   wrap,
 } from '~/server/utils/crypto'
@@ -82,6 +83,11 @@ export default defineEventHandler(async (event) => {
   const recoveryWrappedDek = wrap(dek, recoveryWrapKey)
   const recoveryKeyHash = hashRecoveryKey(recovery.normalised)
 
+  // Asymmetric keypair so this user can receive shared workspaces. The
+  // private key is wrapped under the DEK; clear public key is searchable.
+  const keypair = generateUserKeyPair()
+  const wrappedPrivateKey = wrap(keypair.privateKey, dek)
+
   const [createdUser] = await db
     .insert(users)
     .values({
@@ -93,6 +99,8 @@ export default defineEventHandler(async (event) => {
       recoveryWrappedDek,
       recoveryKeyHash,
       encryptionEnabled: true,
+      publicKey: keypair.publicKey,
+      wrappedPrivateKey,
     })
     .returning()
 

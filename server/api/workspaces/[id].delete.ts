@@ -2,11 +2,15 @@ import { eq } from 'drizzle-orm'
 import { defineEventHandler } from 'h3'
 import { useDb } from '~/server/database/client'
 import { documents, folders, workspaces } from '~/server/database/schema'
-import { assertWorkspaceAccess, parseIdParam } from '~/server/utils/access'
+import { assertWorkspaceOwner, parseIdParam } from '~/server/utils/access'
+import { requireUser } from '~/server/utils/require-user'
 
 export default defineEventHandler(async (event) => {
   const id = parseIdParam(event)
-  await assertWorkspaceAccess(event, id)
+  const user = await requireUser(event)
+  // Owner-only — destroying a shared workspace must not be possible from
+  // an editor/viewer session.
+  await assertWorkspaceOwner(user.id, id)
 
   const db = useDb()
 

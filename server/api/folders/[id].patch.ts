@@ -1,9 +1,9 @@
 import { z } from 'zod'
 import { defineEventHandler, readValidatedBody } from 'h3'
-import { parseIdParam } from '~/server/utils/access'
-import { getDek } from '~/server/utils/dek'
+import { assertFolderMembership, parseIdParam } from '~/server/utils/access'
 import { updateUserFolder } from '~/server/utils/notes'
 import { requireUser } from '~/server/utils/require-user'
+import { getWorkspaceKeyFromWorkspace } from '~/server/utils/workspace-key'
 
 const Body = z
   .object({
@@ -20,7 +20,8 @@ export default defineEventHandler(async (event) => {
   const id = parseIdParam(event)
   const input = await readValidatedBody(event, Body.parse)
   const user = await requireUser(event)
-  const dek = await getDek(event)
-  const folder = await updateUserFolder(user.id, id, input, dek)
+  const { workspace } = await assertFolderMembership(user.id, id)
+  const key = await getWorkspaceKeyFromWorkspace(event, workspace)
+  const folder = await updateUserFolder(user.id, id, input, key)
   return { folder }
 })

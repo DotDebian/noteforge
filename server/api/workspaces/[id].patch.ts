@@ -3,9 +3,10 @@ import { eq } from 'drizzle-orm'
 import { createError, defineEventHandler, readValidatedBody } from 'h3'
 import { useDb } from '~/server/database/client'
 import { workspaces } from '~/server/database/schema'
-import { assertWorkspaceAccess, parseIdParam } from '~/server/utils/access'
-import { getDek } from '~/server/utils/dek'
+import { assertCanEdit, assertWorkspaceMembership, parseIdParam } from '~/server/utils/access'
 import { decryptWorkspace, encryptWorkspace } from '~/server/utils/encrypted-entities'
+import { requireUser } from '~/server/utils/require-user'
+import { getWorkspaceKeyFromWorkspace } from '~/server/utils/workspace-key'
 
 const Body = z
   .object({
@@ -18,12 +19,14 @@ const Body = z
 
 export default defineEventHandler(async (event) => {
   const id = parseIdParam(event)
-  await assertWorkspaceAccess(event, id)
+  const user = await requireUser(event)
+  const { workspace, role } = await assertWorkspaceMembership(user.id, id)
+  assertCanEdit(role)
   const input = await readValidatedBody(event, Body.parse)
-  const dek = await getDek(event)
+  const key = await getWorkspaceKeyFromWorkspace(event, workspace)
 
   const patch: Partial<typeof workspaces.$inferInsert> = {}
-  if (input.name !== undefined) patch.name = encryptWorkspace({ name: input.name }, dek).name!
+  if (input.name !== undefined) patch.name = encryptWorkspace({ name: input.name }, key).name!
   if (input.emoji !== undefined) patch.emoji = input.emoji
 
   const db = useDb()
@@ -36,5 +39,5 @@ export default defineEventHandler(async (event) => {
   if (!updated) {
     throw createError({ statusCode: 404, statusMessage: 'Workspace not found' })
   }
-  return { workspace: decryptWorkspace(updated, dek) }
+  return { workspace: decryptWorkspace(updated, key) }
 })

@@ -38,10 +38,15 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
+  createPrivateKey,
+  createPublicKey,
+  diffieHellman,
+  generateKeyPairSync,
   hkdfSync,
   randomBytes,
   scryptSync,
   timingSafeEqual,
+  type KeyObject,
 } from 'node:crypto'
 
 /* -------------------------------------------------------------------------- */
@@ -315,4 +320,116 @@ export function decryptJsonField<T>(value: string | null | undefined, dek: Buffe
 
 export function encryptJsonField(value: unknown, dek: Buffer | null | undefined): string {
   return encryptField(JSON.stringify(value), dek)
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Asymmetric crypto (X25519 sealed boxes) — workspace sharing                */
+/*                                                                             */
+/*  Each user has an X25519 keypair. The public key (SPKI/DER, ~44 bytes) is   */
+/*  stored in cleartext on `users.publicKey`; the private key (PKCS8/DER,      */
+/*  ~48 bytes) is wrapped under the user's DEK and stored on                   */
+/*  `users.wrappedPrivateKey`. Workspaces flip to a per-workspace WEK on first */
+/*  share — the WEK is sealed (sealed-box pattern) for each member's public    */
+/*  key in `workspace_shares.wrappedWek`. Members decrypt by unsealing with    */
+/*  their private key (which they unwrap with their DEK at request time).      */
+/*                                                                             */
+/*  Sealed-box format: `ephemeralPub(32) || iv(12) || tag(16) || ct(N)` —      */
+/*  classic libsodium pattern with a per-message ephemeral X25519 key + ECDH   */
+/*  + HKDF + AES-256-GCM.                                                      */
+/* -------------------------------------------------------------------------- */
+
+const SEALED_BOX_INFO = Buffer.from('noteforge-sealed-box-v1', 'utf-8')
+const X25519_RAW_PUB_BYTES = 32
+
+export interface UserKeyPair {
+  /** Public key as SPKI/DER buffer — store in `users.publicKey`. */
+  publicKey: Buffer
+  /** Private key as PKCS8/DER buffer — wrap with DEK before storing. */
+  privateKey: Buffer
+}
+
+export function generateUserKeyPair(): UserKeyPair {
+  const { publicKey, privateKey } = generateKeyPairSync('x25519')
+  return {
+    publicKey: publicKey.export({ type: 'spki', format: 'der' }),
+    privateKey: privateKey.export({ type: 'pkcs8', format: 'der' }),
+  }
+}
+
+function importPublicKey(spkiDer: Buffer): KeyObject {
+  return createPublicKey({ key: spkiDer, format: 'der', type: 'spki' })
+}
+
+function importPrivateKey(pkcs8Der: Buffer): KeyObject {
+  return createPrivateKey({ key: pkcs8Der, format: 'der', type: 'pkcs8' })
+}
+
+/**
+ * Extract the raw 32-byte X25519 public key from an SPKI/DER buffer.
+ * X25519 SPKI is always 44 bytes (12-byte algorithm header + 32-byte key),
+ * so the raw key is the last 32 bytes — no parsing required.
+ */
+function rawPublicKey(spkiDer: Buffer): Buffer {
+  return Buffer.from(spkiDer.subarray(spkiDer.byteLength - X25519_RAW_PUB_BYTES))
+}
+
+/**
+ * Seal `plaintext` for the holder of `recipientPublicKey`. Anyone with the
+ * matching private key can open it; nobody else (including the sender after
+ * the fact — the ephemeral key is discarded) can.
+ *
+ * Used to wrap a Workspace Encryption Key (WEK) for each member.
+ */
+export function sealForPublicKey(plaintext: Buffer, recipientPublicKey: Buffer): Buffer {
+  const recipient = importPublicKey(recipientPublicKey)
+  const ephemeral = generateKeyPairSync('x25519')
+  const ephemeralPubRaw = rawPublicKey(ephemeral.publicKey.export({ type: 'spki', format: 'der' }))
+
+  const shared = diffieHellman({ privateKey: ephemeral.privateKey, publicKey: recipient })
+  const recipientPubRaw = rawPublicKey(recipientPublicKey)
+  // Mix both public keys into the HKDF salt — same construction as
+  // libsodium's crypto_box_seal so the derived key binds to the specific
+  // sender/recipient pair.
+  const salt = Buffer.concat([ephemeralPubRaw, recipientPubRaw])
+  const aesKey = Buffer.from(hkdfSync('sha256', shared, salt, SEALED_BOX_INFO, DEK_BYTES))
+
+  const iv = randomBytes(IV_BYTES)
+  const cipher = createCipheriv('aes-256-gcm', aesKey, iv)
+  const ct = Buffer.concat([cipher.update(plaintext), cipher.final()])
+  const tag = cipher.getAuthTag()
+  return Buffer.concat([ephemeralPubRaw, iv, tag, ct])
+}
+
+/** Reverse `sealForPublicKey`. Throws on auth-tag mismatch. */
+export function openSealed(sealed: Buffer, recipientPrivateKey: Buffer, recipientPublicKey: Buffer): Buffer {
+  if (sealed.byteLength < X25519_RAW_PUB_BYTES + IV_BYTES + TAG_BYTES) {
+    throw new Error('openSealed: payload too short')
+  }
+  const ephemeralPubRaw = sealed.subarray(0, X25519_RAW_PUB_BYTES)
+  const iv = sealed.subarray(X25519_RAW_PUB_BYTES, X25519_RAW_PUB_BYTES + IV_BYTES)
+  const tag = sealed.subarray(X25519_RAW_PUB_BYTES + IV_BYTES, X25519_RAW_PUB_BYTES + IV_BYTES + TAG_BYTES)
+  const ct = sealed.subarray(X25519_RAW_PUB_BYTES + IV_BYTES + TAG_BYTES)
+
+  // Build the ephemeral public KeyObject from raw 32 bytes via SPKI wrapper.
+  // The X25519 SPKI prefix is a fixed 12-byte DER header.
+  const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex')
+  const ephemeralPubKey = importPublicKey(Buffer.concat([X25519_SPKI_PREFIX, ephemeralPubRaw]))
+
+  const privateKey = importPrivateKey(recipientPrivateKey)
+  const shared = diffieHellman({ privateKey, publicKey: ephemeralPubKey })
+  const recipientPubRaw = rawPublicKey(recipientPublicKey)
+  const salt = Buffer.concat([ephemeralPubRaw, recipientPubRaw])
+  const aesKey = Buffer.from(hkdfSync('sha256', shared, salt, SEALED_BOX_INFO, DEK_BYTES))
+
+  const decipher = createDecipheriv('aes-256-gcm', aesKey, iv)
+  decipher.setAuthTag(tag)
+  return Buffer.concat([decipher.update(ct), decipher.final()])
+}
+
+/**
+ * Generate a fresh Workspace Encryption Key — symmetric AES-256 key used for
+ * all content-bearing rows of a shared workspace. Same shape as a user DEK.
+ */
+export function generateWek(): Buffer {
+  return randomBytes(DEK_BYTES)
 }

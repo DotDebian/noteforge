@@ -27,6 +27,11 @@ export const users = sqliteTable('users', {
   recoveryKeyHash: text('recovery_key_hash'),
   /** `1` once the user's data has been encrypted at rest. New users start at `1`; legacy users flip after first-login migration. */
   encryptionEnabled: integer('encryption_enabled', { mode: 'boolean' }).notNull().default(false),
+  /* ---- Asymmetric keypair (workspace sharing) ---- */
+  /** X25519 public key (SPKI/DER, 44 bytes) — clear. Used to seal a WEK for this user. Null for legacy users until first login post-share-rollout. */
+  publicKey: blob('public_key', { mode: 'buffer' }),
+  /** X25519 private key (PKCS8/DER, 48 bytes) wrapped under the user's DEK. */
+  wrappedPrivateKey: blob('wrapped_private_key', { mode: 'buffer' }),
 })
 
 /* -------------------------------------------------------------------------- */
@@ -43,7 +48,70 @@ export const workspaces = sqliteTable('workspaces', {
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .default(sql`(unixepoch())`),
+  /**
+   * Encryption mode for this workspace's content.
+   *  - `'dek'`: solo workspace; content is encrypted under the owner's DEK
+   *    (original model). Default for new workspaces.
+   *  - `'wek'`: shared workspace; content is encrypted under a per-workspace
+   *    Workspace Encryption Key (WEK) that is sealed for each member via the
+   *    `workspace_shares` table. The owner has their own `workspace_shares`
+   *    row with role `'owner'` so the key-resolution path stays uniform.
+   *
+   * Flips from `'dek'` to `'wek'` on the first share — see
+   * `POST /api/workspaces/[id]/shares`.
+   */
+  encryptionMode: text('encryption_mode', { enum: ['dek', 'wek'] }).notNull().default('dek'),
 })
+
+/**
+ * Membership rows for shared workspaces.
+ *
+ * Exists ONLY for workspaces in `encryptionMode = 'wek'`. The owner has a
+ * row here (role `'owner'`) alongside each invited user so the
+ * key-resolution path is the same regardless of who is asking.
+ *
+ * `wrappedWek` is the workspace's WEK sealed for THIS user's public key
+ * (sealed-box, see crypto.ts → sealForPublicKey). It is opened with the
+ * user's private key at request time.
+ *
+ * Role semantics:
+ *  - `'owner'`: full access (share, revoke, delete workspace, etc.). Only
+ *    one owner per workspace; matches `workspaces.ownerId`.
+ *  - `'editor'`: read + write content (create/update/delete folders + docs,
+ *    run analysis, etc.).
+ *  - `'viewer'`: read-only — list/read documents, chat over them.
+ *
+ * Soft-deletion: when a user is revoked, the row is hard-deleted (the
+ * `workspace_shares.wrappedWek` is no longer reachable by them). The
+ * audit trail lives in `admin_audit_log`.
+ */
+export const workspaceShares = sqliteTable(
+  'workspace_shares',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    workspaceId: integer('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    role: text('role', { enum: ['owner', 'editor', 'viewer'] }).notNull(),
+    /** WEK sealed for `userId`'s public key (see crypto.ts → sealForPublicKey). */
+    wrappedWek: blob('wrapped_wek', { mode: 'buffer' }).notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    /** Who granted this share (owner at the time of share). */
+    createdBy: integer('created_by')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+  },
+  (t) => ({
+    workspaceUserUniq: uniqueIndex('workspace_shares_workspace_user_uniq').on(t.workspaceId, t.userId),
+    userIdx: index('workspace_shares_user_idx').on(t.userId),
+    workspaceIdx: index('workspace_shares_workspace_idx').on(t.workspaceId),
+  }),
+)
 
 export const folders = sqliteTable(
   'folders',
@@ -711,9 +779,31 @@ export const chatMessages = sqliteTable(
         highlight?: string
         /** Original [#N] citation number used in the assistant's text. */
         citation?: number
+        /** Title of the source doc (denormalised for source-chip render). */
+        title?: string
+        /**
+         * Source kind: 'note' (default) for retrieved doc chunks, 'web' for
+         * web-search results when the web-fallback toggle is on (Wave 2 / N5).
+         */
+        kind?: 'note' | 'web'
+        /** URL for web sources. Unused for note sources. */
+        url?: string
+        /**
+         * `documents.updatedAt` unix-seconds snapshot at the time the answer
+         * was streamed. The UI compares this with the message `createdAt` to
+         * surface a "stale source" badge (Wave 2 / I4) when the underlying
+         * doc was edited after the answer.
+         */
+        docUpdatedAt?: number
       }[]>()
       .notNull()
       .default(sql`'[]'`),
+    /**
+     * User feedback on assistant answers (Wave 2 / N3). NULL = no feedback,
+     * 1 = thumbs up, -1 = thumbs down. Set via the per-message thumbs
+     * buttons in the chat drawer; only meaningful for assistant rows.
+     */
+    userFeedback: integer('user_feedback'),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .default(sql`(unixepoch())`),
@@ -790,6 +880,9 @@ export type Attachment = typeof attachments.$inferSelect
 export type NewAttachment = typeof attachments.$inferInsert
 export type ShareToken = typeof shareTokens.$inferSelect
 export type NewShareToken = typeof shareTokens.$inferInsert
+export type WorkspaceShare = typeof workspaceShares.$inferSelect
+export type NewWorkspaceShare = typeof workspaceShares.$inferInsert
+export type WorkspaceRole = WorkspaceShare['role']
 export type DocumentVersion = typeof documentVersions.$inferSelect
 export type NewDocumentVersion = typeof documentVersions.$inferInsert
 export type McpToken = typeof mcpTokens.$inferSelect

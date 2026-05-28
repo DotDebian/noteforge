@@ -148,6 +148,20 @@
       "when": 1780900000000,
       "tag": "0020_admin_expansion",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1781000000000,
+      "tag": "0021_chat_feedback_and_followups",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1781100000000,
+      "tag": "0022_awesome_ultimates",
+      "breakpoints": true
     }
   ]
 }

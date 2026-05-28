@@ -37,6 +37,7 @@ import {
   generateDek,
   generateRecoveryKey,
   generateSalt,
+  generateUserKeyPair,
   hashRecoveryKey,
   isEncrypted,
   wrap,
@@ -68,6 +69,9 @@ export async function migrateUserToEncrypted(
   const recoveryWrapKey = deriveRecoveryWrapKey(recovery.normalised, kdfSalt)
   const recoveryWrappedDek = wrap(dek, recoveryWrapKey)
   const recoveryKeyHash = hashRecoveryKey(recovery.normalised)
+
+  const keypair = generateUserKeyPair()
+  const wrappedPrivateKey = wrap(keypair.privateKey, dek)
 
   /* ---- 2. Pull every row that needs rewriting --------------------------- */
   const ownedWorkspaces = await db
@@ -262,9 +266,11 @@ export async function migrateUserToEncrypted(
          wrapped_dek = ?,
          recovery_wrapped_dek = ?,
          recovery_key_hash = ?,
-         encryption_enabled = 1
+         encryption_enabled = 1,
+         public_key = ?,
+         wrapped_private_key = ?
        WHERE id = ?`,
-    ).run(kdfSalt, wrappedDek, recoveryWrappedDek, recoveryKeyHash, userId)
+    ).run(kdfSalt, wrappedDek, recoveryWrappedDek, recoveryKeyHash, keypair.publicKey, wrappedPrivateKey, userId)
   })
 
   tx()

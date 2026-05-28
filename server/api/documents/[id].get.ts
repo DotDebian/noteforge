@@ -1,8 +1,8 @@
 import { defineEventHandler } from 'h3'
-import { parseIdParam } from '~/server/utils/access'
-import { getDek } from '~/server/utils/dek'
+import { assertDocumentMembership, parseIdParam } from '~/server/utils/access'
 import { getUserDocument } from '~/server/utils/notes'
 import { requireUser } from '~/server/utils/require-user'
+import { getWorkspaceKeyFromWorkspace } from '~/server/utils/workspace-key'
 
 /**
  * REST single-doc fetch intentionally returns trashed documents
@@ -13,6 +13,7 @@ import { requireUser } from '~/server/utils/require-user'
 export default defineEventHandler(async (event) => {
   const id = parseIdParam(event)
   const user = await requireUser(event)
-  const dek = await getDek(event)
-  return await getUserDocument(user.id, id, { includeTrashed: true }, dek)
+  const { workspace } = await assertDocumentMembership(user.id, id)
+  const key = await getWorkspaceKeyFromWorkspace(event, workspace)
+  return await getUserDocument(user.id, id, { includeTrashed: true }, key)
 })
