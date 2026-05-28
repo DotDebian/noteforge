@@ -59,14 +59,34 @@ const MISTRAL_API_BASE = 'https://api.mistral.ai/v1'
 
 export type MistralRole = 'system' | 'user' | 'assistant'
 
+/**
+ * Content parts accepted by Mistral chat completions on vision models
+ * (Pixtral et al). A user message can carry an array mixing text + image
+ * parts; other roles still use plain strings.
+ */
+export type MistralMessageContentPart =
+  | { type: 'text', text: string }
+  | { type: 'image_url', image_url: string }
+
 export interface MistralMessage {
   role: MistralRole
-  content: string
+  /**
+   * Most messages are plain strings. User messages with an attached image
+   * use the array form so Mistral routes them to the vision pipeline.
+   */
+  content: string | MistralMessageContentPart[]
 }
+
+/**
+ * Mistral chat message content. When tools (e.g. web_search) fire the API
+ * sometimes returns an array of TextChunk / ToolReference fragments instead
+ * of a plain string. We keep this as `unknown` and let callers narrow.
+ */
+export type MistralChoiceContent = string | Array<Record<string, unknown>> | null
 
 interface MistralChatChoice {
   index: number
-  message: { role: MistralRole, content: string }
+  message: { role: MistralRole, content: MistralChoiceContent, tool_calls?: Array<Record<string, unknown>> }
   finish_reason: string | null
 }
 
@@ -77,9 +97,46 @@ interface MistralChatResponse {
   usage?: { prompt_tokens: number, completion_tokens: number, total_tokens: number }
 }
 
+/**
+ * Typed content chunk for tool-enabled chat completions. Mistral may stream a
+ * `content` array of these fragments instead of a plain string when web_search
+ * (or similar tools) is active.
+ */
+export type MistralContentChunk =
+  | { type: 'text', text: string }
+  | {
+    type: 'reference'
+    reference_ids?: number[]
+    references?: Array<{
+      id?: number
+      url?: string
+      title?: string
+      snippet?: string
+      source_type?: string
+    }>
+  }
+
+/**
+ * Discriminated event yielded by `mistralChatStream`. Text events carry an
+ * incremental delta; reference events carry a (possibly partial) list of
+ * source references the model wants to cite.
+ */
+export type MistralStreamEvent =
+  | { kind: 'text', text: string }
+  | {
+    kind: 'reference'
+    refs: Array<{
+      id?: number
+      url?: string
+      title?: string
+      snippet?: string
+    }>
+  }
+
 interface MistralStreamDelta {
   role?: MistralRole
-  content?: string
+  /** Either a plain string (legacy) or an array of typed content chunks. */
+  content?: string | MistralContentChunk[]
 }
 
 interface MistralStreamChoice {
@@ -127,7 +184,7 @@ function getApiKey(): string {
 function getChatModel(override?: string): string {
   if (override) return override
   const cfg = useRuntimeConfig()
-  return (cfg.mistralChatModel as string) || 'mistral-large-latest'
+  return (cfg.mistralChatModel as string) || 'mistral-medium-latest'
 }
 
 function getEmbedModel(override?: string): string {
@@ -163,9 +220,16 @@ export interface MistralChatOptions {
   model?: string
   userId?: number
   operation?: string
+  /**
+   * Mistral tool descriptors. We pass them through verbatim — the most
+   * common use today is `[{ type: 'web_search' }]` for the web-fallback flow.
+   */
+  tools?: Array<Record<string, unknown>>
+  /** Forwarded to `tool_choice` on the request body. */
+  toolChoice?: string | Record<string, unknown>
 }
 
-export async function mistralChat(opts: MistralChatOptions): Promise<{ content: string }> {
+export async function mistralChat(opts: MistralChatOptions): Promise<{ content: string, raw?: MistralChatResponse }> {
   const apiKey = getApiKey()
   const model = getChatModel(opts.model)
   const operation = opts.operation ?? 'chat'
@@ -176,6 +240,10 @@ export async function mistralChat(opts: MistralChatOptions): Promise<{ content: 
   }
   if (opts.jsonMode) {
     body.response_format = { type: 'json_object' }
+  }
+  if (opts.tools && opts.tools.length > 0) {
+    body.tools = opts.tools
+    if (opts.toolChoice !== undefined) body.tool_choice = opts.toolChoice
   }
 
   const start = Date.now()
@@ -211,8 +279,31 @@ export async function mistralChat(opts: MistralChatOptions): Promise<{ content: 
   }
 
   const json = (await res.json()) as MistralChatResponse
-  const content = json.choices[0]?.message?.content
-  if (typeof content !== 'string') {
+  const rawContent = json.choices[0]?.message?.content
+  // With tools (web_search etc.) Mistral may return an array of fragments
+  // instead of a plain string. We flatten string fragments to keep the
+  // simple `content: string` contract for callers that don't care; tool
+  // consumers should reach into `raw` to walk the structured content.
+  let content: string
+  if (typeof rawContent === 'string') {
+    content = rawContent
+  }
+  else if (Array.isArray(rawContent)) {
+    content = rawContent
+      .map((part) => {
+        if (part && typeof part === 'object' && 'text' in part && typeof part.text === 'string') {
+          return part.text
+        }
+        return ''
+      })
+      .join('')
+  }
+  else {
+    content = ''
+  }
+  if (!opts.tools && content.length === 0) {
+    // Without tools an empty content is a hard failure (the old contract).
+    // With tools, the message may carry only tool refs — that's fine.
     logMistralUsage(opts.userId, model, operation, 0, 0, 0, false, Date.now() - start, 'empty_response')
     throw createError({
       statusCode: 502,
@@ -230,7 +321,7 @@ export async function mistralChat(opts: MistralChatOptions): Promise<{ content: 
   else {
     logMistralUsage(opts.userId, model, operation, 0, 0, 0, true, latencyMs)
   }
-  return { content }
+  return { content, raw: json }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -243,24 +334,33 @@ export interface MistralStreamOptions {
   model?: string
   userId?: number
   operation?: string
+  /** Tool descriptors forwarded verbatim (e.g. `[{ type: 'web_search' }]`). */
+  tools?: Array<Record<string, unknown>>
+  toolChoice?: string | Record<string, unknown>
 }
 
 /**
- * Async generator yielding text deltas (`choices[0].delta.content` fragments).
+ * Async generator yielding discriminated stream events. Plain string deltas
+ * are wrapped as `{kind:'text', text}`; tool-enabled completions can also
+ * surface `{kind:'reference', refs}` events for native source citations.
  * Throws a 502 createError if the upstream fails.
  */
 export async function* mistralChatStream(
   opts: MistralStreamOptions,
-): AsyncGenerator<string, void, unknown> {
+): AsyncGenerator<MistralStreamEvent, void, unknown> {
   const apiKey = getApiKey()
   const model = getChatModel(opts.model)
   const operation = opts.operation ?? 'chat_stream'
-  const body = {
+  const body: Record<string, unknown> = {
     model,
     messages: opts.messages,
     temperature: opts.temperature ?? 0.2,
     stream: true,
     stream_options: { include_usage: true },
+  }
+  if (opts.tools && opts.tools.length > 0) {
+    body.tools = opts.tools
+    if (opts.toolChoice !== undefined) body.tool_choice = opts.toolChoice
   }
 
   const start = Date.now()
@@ -341,8 +441,39 @@ export async function* mistralChatStream(
           const parsed = JSON.parse(payload) as MistralStreamChunk
           if (parsed.usage) capturedUsage = parsed.usage
           const delta = parsed.choices[0]?.delta?.content
-          if (typeof delta === 'string' && delta.length > 0) {
-            yield delta
+          if (typeof delta === 'string') {
+            if (delta.length > 0) yield { kind: 'text', text: delta }
+          }
+          else if (Array.isArray(delta)) {
+            for (const part of delta) {
+              if (!part || typeof part !== 'object' || !('type' in part)) continue
+              if (part.type === 'text' && typeof part.text === 'string' && part.text.length > 0) {
+                yield { kind: 'text', text: part.text }
+              }
+              else if (part.type === 'reference') {
+                const refs: Array<{ id?: number, url?: string, title?: string, snippet?: string }> = []
+                // Either `reference_ids` (bare numeric IDs) OR a list of
+                // structured `references`. Pass everything through; the
+                // caller decides what to match against its source list.
+                if (Array.isArray(part.reference_ids)) {
+                  for (const id of part.reference_ids) {
+                    if (typeof id === 'number') refs.push({ id })
+                  }
+                }
+                if (Array.isArray(part.references)) {
+                  for (const r of part.references) {
+                    if (!r || typeof r !== 'object') continue
+                    refs.push({
+                      ...(typeof r.id === 'number' ? { id: r.id } : {}),
+                      ...(typeof r.url === 'string' ? { url: r.url } : {}),
+                      ...(typeof r.title === 'string' ? { title: r.title } : {}),
+                      ...(typeof r.snippet === 'string' ? { snippet: r.snippet } : {}),
+                    })
+                  }
+                }
+                if (refs.length > 0) yield { kind: 'reference', refs }
+              }
+            }
           }
         }
         catch {

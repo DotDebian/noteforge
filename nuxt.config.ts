@@ -17,7 +17,7 @@ export default defineNuxtConfig({
   css: ['~/assets/css/main.css'],
   runtimeConfig: {
     mistralApiKey: process.env.MISTRAL_API_KEY ?? '',
-    mistralChatModel: process.env.MISTRAL_CHAT_MODEL ?? 'mistral-large-latest',
+    mistralChatModel: process.env.MISTRAL_CHAT_MODEL ?? 'mistral-medium-latest',
     mistralEmbedModel: process.env.MISTRAL_EMBED_MODEL ?? 'mistral-embed',
     databaseUrl: process.env.DATABASE_URL ?? 'data/noteforge.db',
     inviteCode: process.env.INVITE_CODE ?? 'NLJELA',

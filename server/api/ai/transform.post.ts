@@ -85,8 +85,9 @@ export default defineEventHandler(async (event) => {
         controller.enqueue(enc.encode(`data: ${JSON.stringify(payload)}\n\n`))
       }
       try {
-        for await (const delta of mistralChatStream({ messages, temperature: 0.3 })) {
-          if (delta.length > 0) emit({ type: 'delta', text: delta })
+        for await (const ev of mistralChatStream({ messages, temperature: 0.3 })) {
+          // Transform doesn't enable tools, so only text events are expected.
+          if (ev.kind === 'text' && ev.text.length > 0) emit({ type: 'delta', text: ev.text })
         }
         emit({ type: 'done' })
       }

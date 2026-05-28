@@ -57,7 +57,7 @@ if [ "$write_env" -eq 1 ]; then
   cat > "$ENV_FILE" <<EOF
 # Généré par setup.sh le $(date -u +%Y-%m-%dT%H:%M:%SZ)
 MISTRAL_API_KEY=$mistral_key
-MISTRAL_CHAT_MODEL=mistral-large-latest
+MISTRAL_CHAT_MODEL=mistral-medium-latest
 MISTRAL_EMBED_MODEL=mistral-embed
 
 NUXT_SESSION_PASSWORD=$session_pwd

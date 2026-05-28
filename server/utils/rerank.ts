@@ -18,6 +18,19 @@
 import { mistralChat } from './mistral'
 import { FAST_MODEL } from './query-rewrite'
 import type { ScoredChunk } from './search'
+import { createCircuitBreaker } from './circuit-breaker'
+
+/**
+ * Breaker for the LLM reranker call. After 3 failures within 60s the breaker
+ * opens for 60s, during which `rerankChunks` short-circuits and returns the
+ * first-stage pool unchanged. Protects chat latency when Mistral is degraded.
+ */
+const rerankerBreaker = createCircuitBreaker({ failureThreshold: 3, cooldownMs: 60_000 })
+
+/** Read-only accessor so future admin panels can surface breaker state. */
+export function getRerankerCircuitOpen(): boolean {
+  return rerankerBreaker.isOpen()
+}
 
 /** Cap for the per-candidate snippet shown to the reranker. */
 const RERANK_SNIPPET_MAX = 600
@@ -68,6 +81,8 @@ export async function rerankChunks(
   if (candidates.length === 1) return candidates.slice(0, topK)
   const q = query.trim()
   if (q.length === 0) return candidates.slice(0, topK)
+  // Breaker open → skip the LLM call entirely and pass the pool through.
+  if (rerankerBreaker.isOpen()) return candidates.slice(0, topK)
 
   const numbered = candidates
     .map((c, i) => `[${i}] ${truncate(c.text, RERANK_SNIPPET_MAX)}`)
@@ -90,8 +105,10 @@ export async function rerankChunks(
     })
     const parsed = JSON.parse(content) as RerankResponse
     llmScores = parseScores(parsed, candidates.length)
+    rerankerBreaker.recordSuccess()
   }
   catch {
+    rerankerBreaker.recordFailure()
     return candidates.slice(0, topK)
   }
 

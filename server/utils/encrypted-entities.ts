@@ -211,6 +211,12 @@ export function encryptChatSources(sources: ChatSource[], dek: Buffer | null | u
     ...s,
     snippet: enc(s.snippet, dek),
     ...(s.highlight !== undefined ? { highlight: enc(s.highlight, dek) } : {}),
+    // Web sources carry their own title and url; both are user-context and
+    // are encrypted at rest. Note sources reconstruct title from the doc
+    // row and historically have not persisted it here, so we leave any
+    // stored title alone for those.
+    ...(s.title !== undefined ? { title: enc(s.title, dek) } : {}),
+    ...(s.url !== undefined ? { url: enc(s.url, dek) } : {}),
   }))
 }
 
@@ -220,6 +226,8 @@ export function decryptChatSources(sources: ChatSource[] | null | undefined, dek
     ...s,
     snippet: dec(s.snippet, dek),
     ...(s.highlight !== undefined && s.highlight !== null ? { highlight: dec(s.highlight, dek) } : {}),
+    ...(s.title !== undefined && s.title !== null ? { title: dec(s.title, dek) } : {}),
+    ...(s.url !== undefined && s.url !== null ? { url: dec(s.url, dek) } : {}),
   }))
 }
 
