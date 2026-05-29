@@ -1072,11 +1072,14 @@ html.dark .sidebar {
   background: theme('colors.ink.900');
   border-right-color: theme('colors.ink.800' / 60%);
 }
+/* Collapsed = fully retracted so the main content reclaims the full width.
+   The expand affordance becomes a floating button in the layout (top-left),
+   so we don't keep a 56px stub here. Width animates for a smooth slide. */
 .sidebar--collapsed {
-  width: 56px;
-}
-.sidebar--collapsed .wordmark {
-  display: none;
+  width: 0;
+  border-right-width: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 
 .sidebar-header {

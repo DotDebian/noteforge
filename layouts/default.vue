@@ -189,6 +189,30 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
     </Transition>
 
     <AppSidebar :collapsed="collapsed" @toggle="collapsed = !collapsed" @close-mobile="mobileSidebar.close()" />
+    <!-- Floating expand button shown when the desktop sidebar is collapsed, so
+         the collapsed rail takes zero horizontal space. Desktop only; hidden
+         in focus mode (the command palette handles re-entry there). -->
+    <Transition name="fade">
+      <button
+        v-if="collapsed && !isFocus"
+        type="button"
+        class="sidebar-expand-fab hidden md:inline-flex"
+        :title="t('sidebar.expand')"
+        :aria-label="t('sidebar.expand')"
+        @click="collapsed = false"
+      >
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+          <path
+            d="M6 4l4 4-4 4"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
+    </Transition>
     <!-- Main column is a flex column: the routed content scrolls in the top
          region, and the chat dock (when open) sits at the bottom and pushes
          the content up, VSCode-terminal-style. -->
@@ -366,5 +390,36 @@ html.dark .focus-pill {
 .focus-pill-leave-to {
   opacity: 0;
   transform: translateY(4px);
+}
+
+/* Floating "expand sidebar" button — appears top-left when the desktop
+   sidebar is fully collapsed. Square, matching the app's icon-button chrome. */
+.sidebar-expand-fab {
+  @apply fixed top-3 left-3 inline-flex items-center justify-center h-9 w-9 rounded-md text-ink-600 dark:text-ink-300 bg-ink-50 dark:bg-ink-800;
+  border: 1px solid theme('colors.ink.200');
+  box-shadow: 0 2px 8px theme('colors.ink.900' / 8%);
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  z-index: 35;
+}
+html.dark .sidebar-expand-fab {
+  border-color: theme('colors.ink.700');
+  box-shadow: 0 2px 8px theme('colors.ink.950' / 40%);
+}
+.sidebar-expand-fab:hover {
+  background: theme('colors.ink.100');
+  color: theme('colors.ink.900');
+}
+html.dark .sidebar-expand-fab:hover {
+  background: theme('colors.ink.700');
+  color: theme('colors.ink.50');
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 160ms ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
 }
 </style>

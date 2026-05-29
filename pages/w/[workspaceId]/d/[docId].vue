@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocalizedTimeAgo } from '~/composables/useLocale'
+import { useResizable } from '~/composables/useResizable'
 import type { Editor } from '@tiptap/vue-3'
 import type { Document, DocAnalysis } from '~/server/database/schema'
 import { useTreeStore } from '~/stores/tree'
@@ -198,6 +199,27 @@ const editorInstance = computed<Editor | null>(() => {
 
 // Sprint 5 / F10 — mobile bottom-sheet for the rail content.
 const insightsSheetOpen = ref(false)
+
+/* ---------- Resizable rail (Outline / Insights / Backlinks) ----------
+ *
+ * Drag the handle on the rail's left edge to widen / narrow it, same gesture
+ * as the chat dock. Width persists to localStorage and is clamped. The rail
+ * is right-anchored with the handle on its left edge, so dragging left grows
+ * it → `invert: true`. */
+const RAIL_MIN_WIDTH = 280
+const RAIL_MAX_WIDTH = 640
+const RAIL_DEFAULT_WIDTH = 378
+const railWidthStore = useLocalStorage('noteforge-doc-rail-width', RAIL_DEFAULT_WIDTH)
+const railWidth = computed(() =>
+  Math.min(RAIL_MAX_WIDTH, Math.max(RAIL_MIN_WIDTH, Math.round(railWidthStore.value || RAIL_DEFAULT_WIDTH))),
+)
+const { resizing: railResizing, start: startRailResize, end: endRailResize } = useResizable({
+  axis: 'x',
+  invert: true,
+  get: () => railWidth.value,
+  set: (px) => { railWidthStore.value = Math.min(RAIL_MAX_WIDTH, Math.max(RAIL_MIN_WIDTH, Math.round(px))) },
+})
+onBeforeUnmount(endRailResize)
 </script>
 
 <template>
@@ -353,7 +375,22 @@ const insightsSheetOpen = ref(false)
       </ClientOnly>
     </article>
 
-    <aside class="doc-rail">
+    <!-- Drag handle for the rail. A full-height flex sibling (not inside the
+         scrolling rail) so it stays pinned on the rail's left edge. lg+ only,
+         matching the rail's own visibility. -->
+    <div
+      class="rail-resize-handle hidden lg:flex"
+      :class="{ 'rail-resize-handle--active': railResizing }"
+      role="separator"
+      aria-orientation="vertical"
+      :aria-label="t('doc.rail.resize')"
+      :title="t('doc.rail.resize')"
+      @pointerdown="startRailResize"
+    />
+    <aside
+      class="doc-rail"
+      :style="{ width: railWidth + 'px' }"
+    >
       <DocumentOutline v-if="doc" :editor="editorInstance" />
       <DocumentInsightsPanel
         v-if="doc"
@@ -602,15 +639,36 @@ html.dark .ghost-btn:hover {
 }
 
 .doc-rail {
-  @apply hidden lg:flex flex-col shrink-0 overflow-auto;
-  /* 378px = just enough for Summary / Tags / Use cases / Questions /
+  @apply relative hidden lg:flex flex-col shrink-0 overflow-auto;
+  /* Width is user-resizable (bound inline, persisted, clamped 280–640px).
+     378px default = enough for Summary / Tags / Use cases / Questions /
      Actions to sit on a single line with the panel's p-4 padding. */
-  width: 378px;
   border-left: 1px solid theme('colors.ink.200' / 60%);
   background: theme('colors.ink.50');
 }
 html.dark .doc-rail {
   border-left-color: theme('colors.ink.800' / 60%);
   background: theme('colors.ink.900');
+}
+/* Resize grip — a full-height flex sibling sitting on the rail's left edge.
+   The hit strip straddles the border (negative right margin pulls it over);
+   the visible bar is a centered pill that brightens on hover / while active. */
+.rail-resize-handle {
+  @apply shrink-0 cursor-ew-resize items-center justify-center self-stretch;
+  width: 7px;
+  margin-right: -7px;
+  z-index: 5;
+  touch-action: none;
+}
+.rail-resize-handle::before {
+  content: '';
+  @apply h-10 w-1 rounded-full bg-ink-300 transition-colors;
+}
+html.dark .rail-resize-handle::before {
+  background: theme('colors.ink.700');
+}
+.rail-resize-handle:hover::before,
+.rail-resize-handle--active::before {
+  background: theme('colors.accent.400');
 }
 </style>
