@@ -189,15 +189,20 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
     </Transition>
 
     <AppSidebar :collapsed="collapsed" @toggle="collapsed = !collapsed" @close-mobile="mobileSidebar.close()" />
+    <!-- Main column is a flex column: the routed content scrolls in the top
+         region, and the chat dock (when open) sits at the bottom and pushes
+         the content up, VSCode-terminal-style. -->
     <main class="app-main">
-      <slot />
+      <div class="app-main-content">
+        <slot />
+      </div>
+      <ChatDrawer @open-doc="onOpenDoc" />
     </main>
     <Transition name="focus-pill">
       <div v-if="isFocus" class="focus-pill" role="status" aria-live="polite">
         {{ t('focus.pill') }}
       </div>
     </Transition>
-    <ChatDrawer @open-doc="onOpenDoc" />
     <button
       v-if="workspaces.current && !chat.open"
       type="button"
@@ -253,7 +258,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
 .app-shell.impersonating { padding-top: 40px; }
 
 .app-main {
-  @apply flex-1 min-w-0 overflow-auto;
+  @apply flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden;
+}
+/* Scroll region for the routed page. Lives above the docked chat panel so the
+   panel stays pinned to the bottom of the main column while content scrolls. */
+.app-main-content {
+  @apply flex-1 min-w-0 min-h-0 overflow-auto;
 }
 
 /* --------------------------------------------------------------------------

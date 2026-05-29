@@ -275,6 +275,7 @@ const en: Messages = {
   'chat.send': 'Send',
   'chat.openTitle': 'Open chat',
   'chat.fab': 'Chat',
+  'chat.resize': 'Drag to resize the chat panel',
   'chat.pinnedFallback': 'this document',
   'chat.sourceFallback': 'Doc {id}',
 
@@ -940,6 +941,7 @@ const fr: Messages = {
   'chat.send': 'Envoyer',
   'chat.openTitle': 'Ouvrir le chat',
   'chat.fab': 'Chat',
+  'chat.resize': 'Glisser pour redimensionner le panneau de chat',
   'chat.pinnedFallback': 'ce document',
   'chat.sourceFallback': 'Doc {id}',
 
