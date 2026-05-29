@@ -127,10 +127,10 @@ watch(open, async (isOpen) => {
   if (pending) {
     draft.value = pending
     await nextTick()
-    composer.value?.focus()
+    composer.value?.focus({ preventScroll: true })
   }
   else {
-    composer.value?.focus()
+    composer.value?.focus({ preventScroll: true })
   }
   scrollToBottom()
 })
@@ -146,7 +146,7 @@ watch(pendingQuestion, async (next) => {
   if (!pending) return
   draft.value = pending
   await nextTick()
-  composer.value?.focus()
+  composer.value?.focus({ preventScroll: true })
 })
 
 // Re-fetch the session list when the user toggles between doc scope and
@@ -299,7 +299,7 @@ function onGoToWorkspace() {
 async function newSession() {
   chat.newSession()
   await nextTick()
-  composer.value?.focus()
+  composer.value?.focus({ preventScroll: true })
 }
 
 async function pickSession(id: number) {
@@ -1754,13 +1754,23 @@ html.dark .dock-resize-handle::before {
   background: theme('colors.accent.400');
 }
 
+/* Open / close: animate the dock's HEIGHT (0 ↔ target) rather than a
+   transform. The dock is a flex sibling, so a transform would grab its full
+   layout height in one frame — the main content would jump up and the slide
+   then played on top, reading as a flicker. Growing the height instead lets
+   the content reflow in sync, smoothly. `overflow: hidden` clips the panel's
+   own content while it's shorter than its natural size; the messages area
+   (flex-1) absorbs the growth so the header/composer don't squish. The
+   `.chat-dock` prefix raises specificity above the mobile `height: 70vh`
+   rule so the collapsed state wins during enter/leave on small screens too. */
 .slide-up-enter-active,
 .slide-up-leave-active {
-  transition: transform 220ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  transition: height 200ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  overflow: hidden;
 }
-.slide-up-enter-from,
-.slide-up-leave-to {
-  transform: translateY(100%);
+.chat-dock.slide-up-enter-from,
+.chat-dock.slide-up-leave-to {
+  height: 0 !important;
 }
 
 /* Mobile (F10): the dock takes most of the viewport height; honor the iOS
