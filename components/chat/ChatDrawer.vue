@@ -20,10 +20,46 @@ const workspaces = useWorkspacesStore()
 const tree = useTreeStore()
 
 const {
-  open, sessions, messages, currentSessionId, scopeFolderId, scopeDocId,
+  open, dockHeight, sessions, messages, currentSessionId, scopeFolderId, scopeDocId,
   sending, loadingSessions, pendingQuestion, webFallbackEnabled, reasoningEnabled,
   allowWritesEnabled, pendingAttachmentId, sessionsHasMore, loadingMoreSessions,
 } = storeToRefs(chat)
+
+/* ---------- Bottom dock resize (VSCode-style) ----------
+ *
+ * The dock is a flex child at the bottom of `.app-main`; dragging the handle
+ * on its top edge resizes it. We track the pointer delta against the height
+ * at drag-start and push the clamped value back to the store (which persists
+ * it). Dragging up grows the panel, so height = startHeight + (startY - y). */
+const resizing = ref(false)
+let resizeStartY = 0
+let resizeStartHeight = 0
+
+function onResizePointerMove(e: PointerEvent) {
+  if (!resizing.value) return
+  chat.setDockHeight(resizeStartHeight + (resizeStartY - e.clientY))
+}
+
+function endResize() {
+  if (!resizing.value) return
+  resizing.value = false
+  window.removeEventListener('pointermove', onResizePointerMove)
+  window.removeEventListener('pointerup', endResize)
+  document.body.style.userSelect = ''
+  document.body.style.cursor = ''
+}
+
+function startResize(e: PointerEvent) {
+  e.preventDefault()
+  resizing.value = true
+  resizeStartY = e.clientY
+  resizeStartHeight = dockHeight.value
+  window.addEventListener('pointermove', onResizePointerMove)
+  window.addEventListener('pointerup', endResize)
+  // Suppress text selection / show the resize cursor for the whole drag.
+  document.body.style.userSelect = 'none'
+  document.body.style.cursor = 'ns-resize'
+}
 
 const draft = ref('')
 const composer = ref<HTMLTextAreaElement | null>(null)
@@ -91,10 +127,10 @@ watch(open, async (isOpen) => {
   if (pending) {
     draft.value = pending
     await nextTick()
-    composer.value?.focus()
+    composer.value?.focus({ preventScroll: true })
   }
   else {
-    composer.value?.focus()
+    composer.value?.focus({ preventScroll: true })
   }
   scrollToBottom()
 })
@@ -110,7 +146,7 @@ watch(pendingQuestion, async (next) => {
   if (!pending) return
   draft.value = pending
   await nextTick()
-  composer.value?.focus()
+  composer.value?.focus({ preventScroll: true })
 })
 
 // Re-fetch the session list when the user toggles between doc scope and
@@ -263,7 +299,7 @@ function onGoToWorkspace() {
 async function newSession() {
   chat.newSession()
   await nextTick()
-  composer.value?.focus()
+  composer.value?.focus({ preventScroll: true })
 }
 
 async function pickSession(id: number) {
@@ -728,6 +764,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   document.removeEventListener('mousedown', handleDocumentClick, true)
+  endResize()
 })
 
 // Title of the doc the chat is currently pinned to (if any). The tree store
@@ -765,22 +802,25 @@ const scopeValue = computed(() => {
 </script>
 
 <template>
-  <Teleport to="body">
-    <!-- Backdrop -->
-    <Transition name="fade">
+  <!-- Bottom-docked chat panel (VSCode-style). Rendered as a flex child of
+       `.app-main`, so it sits below the content and pushes it up instead of
+       overlaying. Height is user-resizable via the top handle. -->
+  <Transition name="slide-up">
+    <aside
+      v-if="open"
+      class="chat-dock flex w-full shrink-0 flex-col border-t border-ink-200 bg-white dark:border-ink-800/60 dark:bg-ink-900"
+      :class="{ 'chat-dock--resizing': resizing }"
+      :style="{ height: dockHeight + 'px' }"
+    >
+      <!-- Resize handle: drag the top edge to grow / shrink the dock. -->
       <div
-        v-if="open"
-        class="fixed inset-0 z-40 bg-ink-950/20 backdrop-blur-[1px]"
-        @click="chat.close()"
+        class="dock-resize-handle"
+        role="separator"
+        aria-orientation="horizontal"
+        :aria-label="t('chat.resize')"
+        :title="t('chat.resize')"
+        @pointerdown="startResize"
       />
-    </Transition>
-
-    <!-- Drawer -->
-    <Transition name="slide">
-      <aside
-        v-if="open"
-        class="chat-drawer fixed right-0 top-0 z-50 flex h-full w-full md:w-[520px] lg:w-[600px] xl:w-[640px] md:max-w-full flex-col border-l border-ink-200 bg-white shadow-2xl dark:border-ink-800/60 dark:bg-ink-900"
-      >
         <!-- Header -->
         <header class="flex items-center gap-2 border-b border-ink-200 px-4 py-3 dark:border-ink-800/60">
           <div class="flex-1 min-w-0">
@@ -1671,9 +1711,8 @@ const scopeValue = computed(() => {
             </Transition>
           </div>
         </footer>
-      </aside>
-    </Transition>
-  </Teleport>
+    </aside>
+  </Transition>
 </template>
 
 <style scoped>
@@ -1685,21 +1724,62 @@ const scopeValue = computed(() => {
 .fade-leave-to {
   opacity: 0;
 }
-.slide-enter-active,
-.slide-leave-active {
-  transition: transform 220ms cubic-bezier(0.2, 0.7, 0.2, 1);
+/* Bottom dock: slides up from the bottom edge. While actively resizing we
+   pin the cursor and drop the children's pointer interactions so the drag is
+   smooth even when the pointer races ahead of layout. */
+.chat-dock {
+  box-shadow: 0 -8px 24px theme('colors.ink.900' / 8%);
 }
-.slide-enter-from,
-.slide-leave-to {
-  transform: translateX(100%);
+html.dark .chat-dock {
+  box-shadow: 0 -8px 24px theme('colors.ink.950' / 45%);
+}
+.chat-dock--resizing {
+  cursor: ns-resize;
 }
 
-/* Mobile (F10): full-screen overlay; honor iOS safe areas top + bottom. */
+/* Resize handle — a slim grab strip on the dock's top edge. The visible bar
+   is a centered pill that brightens on hover; the hit area is the full width. */
+.dock-resize-handle {
+  @apply relative flex h-1.5 w-full shrink-0 cursor-ns-resize items-center justify-center;
+  touch-action: none;
+}
+.dock-resize-handle::before {
+  content: '';
+  @apply h-1 w-10 rounded-full bg-ink-300 transition-colors;
+}
+html.dark .dock-resize-handle::before {
+  background: theme('colors.ink.700');
+}
+.dock-resize-handle:hover::before {
+  background: theme('colors.accent.400');
+}
+
+/* Open / close: animate the dock's HEIGHT (0 ↔ target) rather than a
+   transform. The dock is a flex sibling, so a transform would grab its full
+   layout height in one frame — the main content would jump up and the slide
+   then played on top, reading as a flicker. Growing the height instead lets
+   the content reflow in sync, smoothly. `overflow: hidden` clips the panel's
+   own content while it's shorter than its natural size; the messages area
+   (flex-1) absorbs the growth so the header/composer don't squish. The
+   `.chat-dock` prefix raises specificity above the mobile `height: 70vh`
+   rule so the collapsed state wins during enter/leave on small screens too. */
+.slide-up-enter-active,
+.slide-up-leave-active {
+  transition: height 200ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  overflow: hidden;
+}
+.chat-dock.slide-up-enter-from,
+.chat-dock.slide-up-leave-to {
+  height: 0 !important;
+}
+
+/* Mobile (F10): the dock takes most of the viewport height; honor the iOS
+   home-indicator safe area at the bottom. The store still clamps the height,
+   but on small screens we let it fill more aggressively. */
 @media (max-width: 767px) {
-  .chat-drawer {
-    padding-top: env(safe-area-inset-top, 0);
+  .chat-dock {
+    height: 70vh !important;
     padding-bottom: env(safe-area-inset-bottom, 0);
-    border-left-width: 0;
   }
 }
 

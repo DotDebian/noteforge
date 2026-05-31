@@ -103,6 +103,11 @@ interface PendingCitation {
 
 interface State {
   open: boolean
+  /**
+   * Height of the bottom-docked chat panel, in CSS pixels. Persisted to
+   * localStorage so the dock keeps its size across reloads (VSCode-style).
+   */
+  dockHeight: number
   currentSessionId: number | null
   sessions: ChatSession[]
   /**
@@ -230,9 +235,30 @@ function readPersistedAllowWrites(): boolean {
   }
 }
 
+/** Min / max / default for the bottom dock height (px). */
+export const DOCK_MIN_HEIGHT = 220
+export const DOCK_MAX_HEIGHT = 900
+const DOCK_DEFAULT_HEIGHT = 400
+
+function clampDockHeight(px: number): number {
+  if (!Number.isFinite(px)) return DOCK_DEFAULT_HEIGHT
+  return Math.min(DOCK_MAX_HEIGHT, Math.max(DOCK_MIN_HEIGHT, Math.round(px)))
+}
+
+function readPersistedDockHeight(): number {
+  if (typeof window === 'undefined') return DOCK_DEFAULT_HEIGHT
+  try {
+    return clampDockHeight(useStorage<number>('noteforge-chat-dock-height', DOCK_DEFAULT_HEIGHT).value)
+  }
+  catch {
+    return DOCK_DEFAULT_HEIGHT
+  }
+}
+
 export const useChatStore = defineStore('chat', {
   state: (): State => ({
     open: false,
+    dockHeight: readPersistedDockHeight(),
     currentSessionId: null,
     sessions: [],
     sessionsHasMore: false,
@@ -292,6 +318,21 @@ export const useChatStore = defineStore('chat', {
 
     toggle() {
       this.open = !this.open
+    },
+
+    /**
+     * Persist + update the bottom dock height (clamped). Mirrors the value to
+     * localStorage so the dock keeps its size across reloads.
+     */
+    setDockHeight(px: number) {
+      const next = clampDockHeight(px)
+      this.dockHeight = next
+      if (typeof window !== 'undefined') {
+        try {
+          useStorage<number>('noteforge-chat-dock-height', DOCK_DEFAULT_HEIGHT).value = next
+        }
+        catch { /* localStorage disabled — ignore */ }
+      }
     },
 
     setWorkspace(workspaceId: number | null) {
