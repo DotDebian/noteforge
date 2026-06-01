@@ -905,7 +905,7 @@ defineExpose({ editor })
 <template>
   <div class="flex flex-1 min-h-0 flex-col bg-ink-50 dark:bg-ink-950">
     <!-- Title row -->
-    <div class="mx-auto w-full max-w-3xl xl:max-w-4xl 2xl:max-w-6xl pt-4">
+    <div class="mx-auto w-full max-w-3xl xl:max-w-4xl 2xl:max-w-6xl pt-4 md:px-6">
       <div class="mb-2 flex items-center justify-between gap-3">
         <span
           class="label-mono"
@@ -929,7 +929,7 @@ defineExpose({ editor })
     </div>
 
     <!-- Toolbar -->
-    <div class="mx-auto mt-2 w-full max-w-3xl xl:max-w-4xl 2xl:max-w-6xl">
+    <div class="mx-auto mt-2 w-full max-w-3xl xl:max-w-4xl 2xl:max-w-6xl md:mt-6 md:px-6">
       <EditorToolbar :editor="editor" />
     </div>
 
@@ -940,7 +940,7 @@ defineExpose({ editor })
     <div class="flex-1 min-h-0 overflow-hidden">
       <EditorContent
         :editor="editor"
-        class="editor-scroll prose-document mx-auto h-full max-w-3xl xl:max-w-4xl 2xl:max-w-6xl overflow-y-auto"
+        class="editor-scroll prose-document mx-auto h-full max-w-3xl xl:max-w-4xl 2xl:max-w-6xl overflow-y-auto md:px-6 md:py-8"
       />
     </div>
 
