@@ -11,6 +11,7 @@ import { useChatStore } from '~/stores/chat'
 import { useDialog } from '~/composables/useDialog'
 import { useLocale } from '~/composables/useLocale'
 import { useDocInsightsSheet } from '~/composables/useDocInsightsSheet'
+import { useDocActionsSheet } from '~/composables/useDocActionsSheet'
 
 const route = useRoute()
 const treeStore = useTreeStore()
@@ -101,6 +102,11 @@ const updatedAt = computed(() => {
   return t instanceof Date ? t : new Date(t as unknown as string)
 })
 const editedAgo = useLocalizedTimeAgo(() => updatedAt.value ?? new Date())
+// "modifié il y a X" assembled for the mobile actions sheet (the desktop
+// header renders the two parts separately).
+const editedLabel = computed(() =>
+  updatedAt.value ? `${t('doc.meta.editedPrefix')} ${editedAgo.value}` : null,
+)
 
 async function onDelete() {
   if (!doc.value) return
@@ -201,6 +207,9 @@ const editorInstance = computed<Editor | null>(() => {
 // Sprint 5 / F10 — mobile drawer for the rail content. Shared with the
 // layout's mobile topbar so the rail can be opened from there too.
 const { isOpen: insightsSheetOpen } = useDocInsightsSheet()
+// Mobile action sheet carrying the doc-header actions (the header is hidden
+// below md). Opened from the topbar; toggled via a shared composable.
+const { isOpen: actionsSheetOpen } = useDocActionsSheet()
 
 /* ---------- Resizable rail (Outline / Insights / Backlinks) ----------
  *
@@ -431,6 +440,22 @@ onBeforeUnmount(endRailResize)
       @close="insightsSheetOpen = false"
       @open-doc="onOpenRelated"
     />
+
+    <DocActionsSheet
+      v-if="doc"
+      :is-open="actionsSheetOpen"
+      :title="liveTitle || t('doc.untitled')"
+      :edited-label="editedLabel"
+      :is-favorited="isFavorited"
+      :has-active-shares="hasActiveShares"
+      @close="actionsSheetOpen = false"
+      @toggle-favorite="onToggleFavorite"
+      @ask="onAskThisDoc"
+      @share="shareOpen = true"
+      @history="historyOpen = true"
+      @delete="onDelete"
+      @export="onExport"
+    />
   </div>
 </template>
 
@@ -462,8 +487,12 @@ html.dark .doc-header {
   @apply flex items-center gap-1.5 font-sans uppercase text-[11px] font-semibold tracking-[0.08em] text-ink-500 dark:text-ink-400;
 }
 @media (max-width: 767px) {
+  /* Below md the header's crumbs + meta + action chips ate ~430px of
+     vertical space above the editor. Hide it entirely: the topbar carries
+     the title, and the doc-actions sheet (opened from the topbar) surfaces
+     the favorite / Ask / Share / Export / History / Delete controls. */
   .doc-header {
-    @apply mb-4 pb-3 gap-2;
+    display: none;
   }
 }
 .crumbs {

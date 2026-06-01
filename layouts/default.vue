@@ -11,6 +11,7 @@ import { useIsMac, hasPrimaryModifier } from '~/composables/usePlatform'
 import { useFocusMode } from '~/composables/useFocusMode'
 import { useMobileSidebar } from '~/composables/useMobileSidebar'
 import { useDocInsightsSheet } from '~/composables/useDocInsightsSheet'
+import { useDocActionsSheet } from '~/composables/useDocActionsSheet'
 import { useLocale } from '~/composables/useLocale'
 
 const collapsed = ref(false)
@@ -27,6 +28,7 @@ const { isFocus, toggle: toggleFocus, disable: disableFocus } = useFocusMode()
 const mobileSidebar = useMobileSidebar()
 const { isOpen: mobileSidebarOpen } = mobileSidebar
 const insightsSheet = useDocInsightsSheet()
+const actionsSheet = useDocActionsSheet()
 const { t } = useLocale()
 
 // Show the doc-rail (Insights) topbar button only on a document route. The
@@ -66,6 +68,7 @@ async function exitImpersonation() {
 watch(() => route.fullPath, () => {
   mobileSidebar.close()
   insightsSheet.close()
+  actionsSheet.close()
 })
 
 // Mobile topbar title — workspace name when no doc is open, otherwise the
@@ -186,6 +189,22 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
             stroke-width="1.6"
             stroke-linecap="round"
           />
+        </svg>
+      </button>
+      <!-- Doc actions (favorite / Ask / Share / Export / History / Delete).
+           Doc-route only; balances the bar at 2 icons left + 2 right. The
+           in-page .doc-header is hidden below md, so this is the entry point. -->
+      <button
+        v-if="isDocRoute"
+        type="button"
+        class="mobile-icon-btn"
+        :aria-label="t('doc.actions.open')"
+        @click="actionsSheet.open()"
+      >
+        <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true">
+          <circle cx="3" cy="8" r="1.3" fill="currentColor" />
+          <circle cx="8" cy="8" r="1.3" fill="currentColor" />
+          <circle cx="13" cy="8" r="1.3" fill="currentColor" />
         </svg>
       </button>
       <div class="mobile-topbar-title">{{ topbarTitle }}</div>
