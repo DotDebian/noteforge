@@ -23,6 +23,18 @@ body,
   height: 100%;
 }
 
+/* The ROOT element's background is what WebKit paints into the safe-area
+   insets (under the iOS home indicator / status bar) in an installed,
+   edge-to-edge PWA. `body`'s background does NOT reach there, so a transparent
+   <html> left a black bar at the bottom in standalone mode. Paint html with
+   the theme background so the safe areas blend with the app. */
+html {
+  @apply bg-ink-50;
+}
+html.dark {
+  @apply bg-ink-950;
+}
+
 body {
   @apply bg-ink-50 text-ink-900 antialiased;
   font-feature-settings: 'cv11', 'ss01';
