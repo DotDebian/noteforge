@@ -52,7 +52,10 @@ export default defineNuxtConfig({
       title: 'NoteForge',
       meta: [
         { charset: 'utf-8' },
-        { name: 'viewport', content: 'width=device-width, initial-scale=1, viewport-fit=cover' },
+        // `maximum-scale=1, user-scalable=no` blocks pinch-zoom; `touch-action`
+        // (in main.css) blocks double-tap zoom. Gives the installed PWA a fixed,
+        // native-app viewport.
+        { name: 'viewport', content: 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover' },
         // PWA / installability. `theme-color` tints the OS chrome in standalone
         // mode; the apple-* metas give iOS its standalone behaviour + title
         // (iOS ignores the web manifest's display/name).

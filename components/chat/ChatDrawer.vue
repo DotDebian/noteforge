@@ -802,9 +802,17 @@ const scopeValue = computed(() => {
 </script>
 
 <template>
-  <!-- Bottom-docked chat panel (VSCode-style). Rendered as a flex child of
-       `.app-main`, so it sits below the content and pushes it up instead of
-       overlaying. Height is user-resizable via the top handle. -->
+  <!-- Desktop: bottom-docked panel (VSCode-style) — a flex child of `.app-main`
+       that pushes content up. Mobile: the CSS pins it (position: fixed) so it
+       OVERLAYS content instead, with a tap-to-dismiss backdrop below md. -->
+  <Transition name="fade">
+    <div
+      v-if="open"
+      class="chat-mobile-backdrop md:hidden"
+      aria-hidden="true"
+      @click="chat.close()"
+    />
+  </Transition>
   <Transition name="slide-up">
     <aside
       v-if="open"
@@ -1773,14 +1781,24 @@ html.dark .dock-resize-handle::before {
   height: 0 !important;
 }
 
-/* Mobile (F10): the dock takes most of the viewport height; honor the iOS
-   home-indicator safe area at the bottom. The store still clamps the height,
-   but on small screens we let it fill more aggressively. */
+/* Mobile: the chat OVERLAYS the content instead of pushing it up. Pinning the
+   dock to the viewport (position: fixed) takes it out of the flex flow so
+   `.app-main-content` keeps its full height behind it. Fills most of the
+   viewport and honours the iOS home-indicator safe area. */
 @media (max-width: 767px) {
   .chat-dock {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 50;
     height: 70vh !important;
     padding-bottom: env(safe-area-inset-bottom, 0);
   }
+}
+/* Backdrop behind the overlaid chat on mobile — tap to dismiss. */
+.chat-mobile-backdrop {
+  @apply fixed inset-0 z-40 bg-ink-950/30 backdrop-blur-[1px];
 }
 
 /* Per-message action bar (regenerate / edit / copy / branch).

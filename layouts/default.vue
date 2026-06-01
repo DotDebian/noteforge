@@ -141,8 +141,54 @@ async function onGlobalKeydown(e: KeyboardEvent) {
   }
 }
 
-onMounted(() => window.addEventListener('keydown', onGlobalKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
+/**
+ * Touch swipe gestures (mobile only) for the sidebar drawer:
+ *  - swipe right from the left edge → open
+ *  - swipe left (anywhere) while open → close
+ * Edge-anchored open avoids hijacking horizontal scrollers (tables, code).
+ * Distance/angle thresholds keep it from firing on vertical scrolls or taps.
+ */
+const SWIPE_EDGE = 28
+const SWIPE_MIN = 60
+const SWIPE_MAX_ANGLE = 0.6 // |dy| must stay below 0.6·|dx|
+let swipeX = 0
+let swipeY = 0
+let swipeFromEdge = false
+
+function onTouchStart(e: TouchEvent) {
+  if (e.touches.length !== 1) return
+  const t = e.touches[0]!
+  swipeX = t.clientX
+  swipeY = t.clientY
+  swipeFromEdge = t.clientX <= SWIPE_EDGE
+}
+
+function onTouchEnd(e: TouchEvent) {
+  const t = e.changedTouches[0]
+  if (!t) return
+  if (!window.matchMedia('(max-width: 767px)').matches) return
+  const dx = t.clientX - swipeX
+  const dy = t.clientY - swipeY
+  if (Math.abs(dx) < SWIPE_MIN) return
+  if (Math.abs(dy) > Math.abs(dx) * SWIPE_MAX_ANGLE) return // too vertical
+  if (dx > 0 && swipeFromEdge && !mobileSidebarOpen.value) {
+    mobileSidebar.open()
+  }
+  else if (dx < 0 && mobileSidebarOpen.value) {
+    mobileSidebar.close()
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('touchstart', onTouchStart, { passive: true })
+  window.addEventListener('touchend', onTouchEnd, { passive: true })
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('touchstart', onTouchStart)
+  window.removeEventListener('touchend', onTouchEnd)
+})
 </script>
 
 <template>

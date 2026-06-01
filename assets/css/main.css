@@ -39,6 +39,14 @@ body {
   @apply bg-ink-50 text-ink-900 antialiased;
   font-feature-settings: 'cv11', 'ss01';
   transition: background-color 180ms ease, color 180ms ease;
+  /* No rubber-band bounce at the document edges, and no double-tap zoom
+     (pinch is blocked by the viewport meta). `manipulation` keeps normal
+     pan/scroll but drops the legacy double-tap-to-zoom + 300ms delay. */
+  overscroll-behavior: none;
+  touch-action: manipulation;
+}
+html {
+  overscroll-behavior: none;
 }
 
 html.dark body {
@@ -197,8 +205,8 @@ html.dark .ProseMirror p.is-editor-empty:first-child::after {
    -------------------------------------------------------------------------- */
 
 body {
-  /* Prevent pull-to-refresh / over-scroll from leaking past the app shell. */
-  overscroll-behavior: contain;
+  /* No rubber-band / pull-to-refresh bounce at the document edges. */
+  overscroll-behavior: none;
 }
 
 @media (max-width: 767px) {
@@ -262,12 +270,16 @@ body {
   }
 }
 
-/* iOS momentum scroll on the main scroll containers. */
+/* iOS momentum scroll on the main scroll containers; `overscroll-behavior:
+   none` stops them bouncing at their own top/bottom and prevents the scroll
+   from chaining out to the document. */
 .sidebar,
 .tree,
 .editor-scroll,
-.mobile-sheet {
+.mobile-sheet,
+.app-main-content {
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior: none;
 }
 
 /* Safe-area bottom padding for the editor canvas so the last line clears
