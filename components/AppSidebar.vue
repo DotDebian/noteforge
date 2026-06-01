@@ -1000,6 +1000,26 @@ async function onRootDocDrop(e: DragEvent) {
         <span>Admin</span>
       </NuxtLink>
 
+      <!-- TEMP: viewport/safe-area diagnostics for the iOS PWA black-bar issue. -->
+      <NuxtLink
+        to="/debug"
+        class="trash-link"
+        active-class="trash-link--active"
+        title="Debug viewport / safe-area"
+      >
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+          <path
+            d="M5 4a3 3 0 0 1 6 0 M4 7h8 M5 7v5a3 3 0 0 0 6 0V7 M2 9h2 M12 9h2 M3 5L1.5 4 M13 5l1.5-1 M3 12l-1.5 1 M13 12l1.5 1"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.25"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <span>Debug</span>
+      </NuxtLink>
+
       <div class="user-row" :title="userEmail">
         <span class="avatar">{{ initials }}</span>
         <span class="user-name">{{ displayName }}</span>
