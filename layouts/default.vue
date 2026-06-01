@@ -317,11 +317,17 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
 <style scoped>
 .app-shell {
   @apply h-full w-full flex bg-ink-50 dark:bg-ink-950;
-  /* iOS installed PWA: `height: 100%` (from h-full) resolves SHORT of the
-     screen in standalone mode, leaving a dark band below the app. `100dvh`
-     fills the true dynamic viewport (full screen, no toolbars in standalone).
-     The h-full above stays as the fallback for browsers without dvh. */
-  height: 100dvh;
+}
+/* Installed PWA only. On iOS standalone the `height: 100%` chain
+   (html→body→#__nuxt→app-shell) resolves to the SMALL viewport (e.g. 873px on
+   a Dynamic-Island iPhone) while <body> reports the full screen (932px) — so
+   the shell ends ~one safe-inset short and a band of <body> shows at the
+   bottom. `100vh` in standalone = the full screen (no browser toolbar to
+   over-extend under). Scoped to display-mode:standalone so the in-browser
+   behaviour (where 100vh WOULD over-extend) is left untouched. Confirmed on
+   device: 100vh removes the band; 100% / 100dvh do not. */
+@media (display-mode: standalone) {
+  .app-shell { height: 100vh; }
 }
 
 /* Impersonation banner — fixed at the top of the viewport so it stays
