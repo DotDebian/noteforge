@@ -219,6 +219,10 @@ body {
     transition: transform 220ms cubic-bezier(0.2, 0.7, 0.2, 1);
     /* Sidebar drawer doesn't need the right border above the drawer edge. */
     box-shadow: 0 0 24px rgba(0, 0, 0, 0.12);
+    /* Installed PWA runs edge-to-edge (viewport-fit=cover): keep the header
+       out from under the status bar and the footer above the gesture bar. */
+    padding-top: env(safe-area-inset-top, 0);
+    padding-bottom: env(safe-area-inset-bottom, 0);
   }
   html.dark .sidebar {
     box-shadow: 0 0 24px rgba(0, 0, 0, 0.4);

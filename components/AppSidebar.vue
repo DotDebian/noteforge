@@ -609,7 +609,7 @@ async function onRootDocDrop(e: DragEvent) {
       <!-- Desktop collapse toggle (>= md only) -->
       <button
         type="button"
-        class="icon-btn hidden md:inline-flex"
+        class="icon-btn sidebar-collapse-desktop hidden md:inline-flex"
         :title="collapsed ? t('sidebar.expand') : t('sidebar.collapse')"
         @click="emit('toggle')"
       >
@@ -1230,6 +1230,12 @@ html.dark .ghost-btn:hover {
 }
 @media (min-width: 768px) {
   .sidebar-close-mobile { display: none; }
+}
+/* Mirror of the above for the desktop collapse toggle: the `hidden` utility is
+   shadowed by `.icon-btn { @apply inline-flex }` (scoped specificity wins), so
+   the collapse arrow leaked onto mobile. Enforce the <md hide in scoped CSS. */
+@media (max-width: 767px) {
+  .sidebar-collapse-desktop { display: none; }
 }
 .icon-btn:hover {
   background: theme('colors.ink.100');
