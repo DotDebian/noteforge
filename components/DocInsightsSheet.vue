@@ -60,15 +60,14 @@ onBeforeUnmount(() => {
         @click="onBackdrop"
       />
     </Transition>
-    <Transition name="slide-up">
+    <Transition name="slide-right">
       <section
         v-if="isOpen"
-        class="mobile-sheet insights-sheet"
+        class="insights-sheet"
         role="dialog"
         aria-label="Document insights"
       >
-        <div class="mobile-sheet-handle" aria-hidden="true" />
-        <header class="mobile-sheet-header">
+        <header class="insights-sheet-header">
           <h2 class="sheet-title">{{ t('insights.title') }}</h2>
           <button
             type="button"
@@ -87,7 +86,7 @@ onBeforeUnmount(() => {
             </svg>
           </button>
         </header>
-        <div class="mobile-sheet-body">
+        <div class="insights-sheet-body">
           <DocumentOutline :editor="editor" />
           <DocumentInsightsPanel
             :doc-id="docId"
@@ -106,9 +105,43 @@ onBeforeUnmount(() => {
   @apply fixed inset-0 bg-ink-950/40 backdrop-blur-[1px];
   z-index: 49;
 }
+/* Full-screen side drawer on mobile (matches the chat drawer pattern). Slides
+   in from the right and fills the viewport so the user reads insights with the
+   same footprint as the editor. */
 .insights-sheet {
-  /* The mobile-sheet shell is defined in main.css; just layer-z above the
-     backdrop. */
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  background: theme('colors.ink.50');
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.18);
+  padding-top: env(safe-area-inset-top, 0);
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+html.dark .insights-sheet {
+  background: theme('colors.ink.900');
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.45);
+}
+.insights-sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  flex-shrink: 0;
+  border-bottom: 1px solid theme('colors.ink.200' / 60%);
+}
+html.dark .insights-sheet-header {
+  border-bottom-color: theme('colors.ink.800' / 60%);
+}
+.insights-sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .sheet-title {
   @apply font-serif text-[15px] font-semibold text-ink-900 dark:text-ink-100;
@@ -134,12 +167,12 @@ html.dark .sheet-close:hover {
 .fade-leave-to {
   opacity: 0;
 }
-.slide-up-enter-active,
-.slide-up-leave-active {
+.slide-right-enter-active,
+.slide-right-leave-active {
   transition: transform 240ms cubic-bezier(0.2, 0.7, 0.2, 1);
 }
-.slide-up-enter-from,
-.slide-up-leave-to {
-  transform: translateY(100%);
+.slide-right-enter-from,
+.slide-right-leave-to {
+  transform: translateX(100%);
 }
 </style>

@@ -10,6 +10,7 @@ import { usePaletteStore } from '~/stores/palette'
 import { useIsMac, hasPrimaryModifier } from '~/composables/usePlatform'
 import { useFocusMode } from '~/composables/useFocusMode'
 import { useMobileSidebar } from '~/composables/useMobileSidebar'
+import { useDocInsightsSheet } from '~/composables/useDocInsightsSheet'
 import { useLocale } from '~/composables/useLocale'
 
 const collapsed = ref(false)
@@ -25,7 +26,13 @@ const { creating } = storeToRefs(workspaces)
 const { isFocus, toggle: toggleFocus, disable: disableFocus } = useFocusMode()
 const mobileSidebar = useMobileSidebar()
 const { isOpen: mobileSidebarOpen } = mobileSidebar
+const insightsSheet = useDocInsightsSheet()
 const { t } = useLocale()
+
+// Show the doc-rail (Insights) topbar button only on a document route. The
+// sheet itself is rendered by the doc page, gated on `doc` being loaded, so
+// the button just flips the shared ref — the doc page handles the rest.
+const isDocRoute = computed(() => route.params.docId != null)
 
 /**
  * Impersonation banner: when an admin uses `POST /api/admin/users/:id/impersonate`
@@ -54,8 +61,12 @@ async function exitImpersonation() {
 }
 
 // Auto-close the mobile drawer on route change so navigating from a doc
-// in the sidebar dismisses the overlay.
-watch(() => route.fullPath, () => mobileSidebar.close())
+// in the sidebar dismisses the overlay. Same for the insights sheet — its
+// open state is module-scoped and would otherwise leak between docs.
+watch(() => route.fullPath, () => {
+  mobileSidebar.close()
+  insightsSheet.close()
+})
 
 // Mobile topbar title — workspace name when no doc is open, otherwise the
 // current doc title held in the tree store / palette recents.
@@ -154,13 +165,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
       </button>
     </div>
 
-    <!-- Mobile top bar: hamburger + title. Visible only below md. Hidden in
-         focus mode to keep the writer's view clean — the command palette
-         (Ctrl/Cmd+K) is the keyboard escape hatch. -->
+    <!-- Mobile top bar: hamburger + title + actions (chat / insights). Visible
+         only below md. Hidden in focus mode to keep the writer's view clean —
+         the command palette (Ctrl/Cmd+K) is the keyboard escape hatch.
+         Chat + insights buttons live here (rather than only as the floating
+         FAB / the in-page meta chip) so they stay reachable regardless of
+         scroll position or whether the doc has finished loading. -->
     <header v-if="!isFocus" class="mobile-topbar md:hidden">
       <button
         type="button"
-        class="mobile-hamburger"
+        class="mobile-icon-btn"
         :aria-label="t('sidebar.openNavigation')"
         @click="mobileSidebar.toggle()"
       >
@@ -175,7 +189,36 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
         </svg>
       </button>
       <div class="mobile-topbar-title">{{ topbarTitle }}</div>
-      <span class="mobile-topbar-spacer" aria-hidden="true" />
+      <button
+        v-if="isDocRoute"
+        type="button"
+        class="mobile-icon-btn"
+        :aria-label="t('doc.meta.insightsTitle')"
+        @click="insightsSheet.open()"
+      >
+        <!-- Right sidebar / panel glyph. -->
+        <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true">
+          <rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4" />
+          <path d="M10 3v10" fill="none" stroke="currentColor" stroke-width="1.4" />
+        </svg>
+      </button>
+      <button
+        v-if="workspaces.current"
+        type="button"
+        class="mobile-icon-btn"
+        :aria-label="t('chat.openTitle')"
+        @click="chat.openWithQuestion()"
+      >
+        <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true">
+          <path
+            d="M3 4h10v6H7l-3 3v-3H3z"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
     </header>
 
     <!-- Backdrop behind the mobile sidebar. Click to dismiss. -->
@@ -315,21 +358,18 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
 html.dark .mobile-topbar {
   border-bottom-color: theme('colors.ink.800' / 60%);
 }
-.mobile-hamburger {
-  @apply inline-flex items-center justify-center h-9 w-9 rounded-md text-ink-700 dark:text-ink-200;
+.mobile-icon-btn {
+  @apply inline-flex items-center justify-center h-9 w-9 shrink-0 rounded-md text-ink-700 dark:text-ink-200;
   transition: background 120ms ease, color 120ms ease;
 }
-.mobile-hamburger:hover {
+.mobile-icon-btn:hover {
   background: theme('colors.ink.100');
 }
-html.dark .mobile-hamburger:hover {
+html.dark .mobile-icon-btn:hover {
   background: theme('colors.ink.800');
 }
 .mobile-topbar-title {
   @apply flex-1 min-w-0 truncate text-center font-serif text-[15px] font-semibold text-ink-900 dark:text-ink-100;
-}
-.mobile-topbar-spacer {
-  @apply inline-block h-9 w-9 shrink-0;
 }
 
 .mobile-sidebar-backdrop {
@@ -337,6 +377,11 @@ html.dark .mobile-hamburger:hover {
   z-index: 45;
 }
 
+/* Floating chat button — desktop only. Below md the topbar exposes the same
+   action, so duplicating it as a FAB just clutters the writing area. */
+@media (max-width: 767px) {
+  .chat-fab { display: none; }
+}
 .chat-fab {
   @apply fixed bottom-5 right-5 inline-flex items-center gap-2 px-3.5 py-2 rounded-full;
   @apply font-sans uppercase text-[11px] font-semibold tracking-[0.08em] text-ink-700 dark:text-ink-200 bg-ink-50 dark:bg-ink-800;

@@ -10,6 +10,7 @@ import { useFavoritesStore } from '~/stores/favorites'
 import { useChatStore } from '~/stores/chat'
 import { useDialog } from '~/composables/useDialog'
 import { useLocale } from '~/composables/useLocale'
+import { useDocInsightsSheet } from '~/composables/useDocInsightsSheet'
 
 const route = useRoute()
 const treeStore = useTreeStore()
@@ -197,8 +198,9 @@ const editorInstance = computed<Editor | null>(() => {
   return exposed?.editor ?? null
 })
 
-// Sprint 5 / F10 — mobile bottom-sheet for the rail content.
-const insightsSheetOpen = ref(false)
+// Sprint 5 / F10 — mobile drawer for the rail content. Shared with the
+// layout's mobile topbar so the rail can be opened from there too.
+const { isOpen: insightsSheetOpen } = useDocInsightsSheet()
 
 /* ---------- Resizable rail (Outline / Insights / Backlinks) ----------
  *
@@ -339,6 +341,9 @@ onBeforeUnmount(endRailResize)
           >
             {{ t('doc.meta.insights') }}
           </button>
+          <!-- The topbar (layout/default.vue) also exposes this same sheet on
+               mobile. Both entry points toggle the same shared composable. -->
+
         </div>
       </header>
 
