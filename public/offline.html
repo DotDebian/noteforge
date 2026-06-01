@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Hors ligne — NoteForge</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 1.25rem; padding: 2rem;
+      background: #0a0a06; color: #e7e5e4;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif; text-align: center;
+    }
+    .dot { width: 56px; height: 56px; border-radius: 999px; background: #f97316; }
+    h1 { font-family: 'Source Serif 4', Georgia, serif; font-size: 1.5rem; font-weight: 600; margin: 0; }
+    p { max-width: 22rem; margin: 0; color: #a8a29e; font-size: 0.95rem; line-height: 1.5; }
+    button {
+      margin-top: 0.5rem; padding: 0.6rem 1.2rem; border: 1px solid #44403c; border-radius: 0.5rem;
+      background: transparent; color: #e7e5e4; font: inherit; font-size: 0.8rem;
+      text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+    button:hover { background: #1c1917; border-color: #57534e; }
+  </style>
+</head>
+<body>
+  <div class="dot" aria-hidden="true"></div>
+  <h1>Vous êtes hors ligne</h1>
+  <p>NoteForge a besoin d'une connexion pour charger vos notes chiffrées. Vérifiez votre réseau puis réessayez.</p>
+  <button type="button" onclick="location.reload()">Réessayer</button>
+</body>
+</html>

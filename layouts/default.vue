@@ -310,6 +310,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
     <NewWorkspaceModal :open="creating" @close="workspaces.closeCreate()" />
     <CommandPalette />
     <DialogHost />
+    <PwaInstallPrompt />
   </div>
 </template>
 
