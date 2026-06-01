@@ -377,11 +377,6 @@ html.dark .mobile-icon-btn:hover {
   z-index: 45;
 }
 
-/* Floating chat button — desktop only. Below md the topbar exposes the same
-   action, so duplicating it as a FAB just clutters the writing area. */
-@media (max-width: 767px) {
-  .chat-fab { display: none; }
-}
 .chat-fab {
   @apply fixed bottom-5 right-5 inline-flex items-center gap-2 px-3.5 py-2 rounded-full;
   @apply font-sans uppercase text-[11px] font-semibold tracking-[0.08em] text-ink-700 dark:text-ink-200 bg-ink-50 dark:bg-ink-800;
@@ -408,6 +403,12 @@ html.dark .chat-fab:hover {
 }
 .chat-fab-label {
   @apply leading-none;
+}
+/* Below md the topbar exposes the same action, so duplicating it as a FAB
+   just clutters the writing area. Placed AFTER the base `.chat-fab` rule so
+   `display: none` wins on source order (both have the same specificity). */
+@media (max-width: 767px) {
+  .chat-fab { display: none; }
 }
 
 /* Focus-mode pill (I10) — small confirmation chip near the bottom-right.
