@@ -317,6 +317,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
 <style scoped>
 .app-shell {
   @apply h-full w-full flex bg-ink-50 dark:bg-ink-950;
+  /* iOS installed PWA: `height: 100%` (from h-full) resolves SHORT of the
+     screen in standalone mode, leaving a dark band below the app. `100dvh`
+     fills the true dynamic viewport (full screen, no toolbars in standalone).
+     The h-full above stays as the fallback for browsers without dvh. */
+  height: 100dvh;
 }
 
 /* Impersonation banner — fixed at the top of the viewport so it stays
