@@ -212,7 +212,13 @@ body {
     top: 0 !important;
     left: 0 !important;
     bottom: 0 !important;
-    height: 100% !important;
+    /* `height: auto` (not 100%) so top+bottom define the box. On iOS standalone
+       `height: 100%` resolves to the SAFE viewport (minus the home-indicator
+       strip) and, being over-constrained, the spec drops `bottom` — leaving the
+       drawer ~34px short and the darker page bg peeking through at the bottom
+       ("un jour"). Letting top:0/bottom:0 stretch it guarantees full coverage;
+       the background then paints under the home indicator. */
+    height: auto !important;
     width: 100vw !important;
     z-index: 50 !important;
     transform: translateX(-100%);
