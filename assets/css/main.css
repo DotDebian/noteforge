@@ -264,8 +264,8 @@ body {
   /* Editor padding shrinks on small screens — the doc page uses
      px-10/lg:px-14 which crowds out the writing area at 375px. */
   .doc-area {
-    padding-left: 1rem !important;
-    padding-right: 1rem !important;
+    padding-left: 2rem !important;
+    padding-right: 2rem !important;
     padding-top: 1rem !important;
   }
 }
