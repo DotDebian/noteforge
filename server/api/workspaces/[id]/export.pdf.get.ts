@@ -18,8 +18,10 @@ import { documents, folders } from '~/server/database/schema'
 import type { Document, Folder } from '~/server/database/schema'
 import { assertWorkspaceAccess, parseIdParam } from '~/server/utils/access'
 import { activeDocsWhere, activeFoldersWhere } from '~/server/utils/active'
+import { decryptDocument, decryptFolder } from '~/server/utils/encrypted-entities'
 import { slugify } from '~/server/utils/export'
 import { renderWorkspacePdf } from '~/server/utils/export-pdf'
+import { getWorkspaceKeyFromWorkspace } from '~/server/utils/workspace-key'
 
 function orderDocs(folderRows: Folder[], docRows: Document[]): Document[] {
   // Pre-order traversal of the folder tree. We sort children alphabetically
@@ -75,19 +77,22 @@ function orderDocs(folderRows: Folder[], docRows: Document[]): Document[] {
 export default defineEventHandler(async (event) => {
   const id = parseIdParam(event)
   const workspace = await assertWorkspaceAccess(event, id)
+  const key = await getWorkspaceKeyFromWorkspace(event, workspace)
   const db = useDb()
 
-  const folderRows = await db
+  const folderRows = (await db
     .select()
     .from(folders)
     .where(and(eq(folders.workspaceId, workspace.id), activeFoldersWhere()))
-    .orderBy(asc(folders.position), asc(folders.id))
+    .orderBy(asc(folders.position), asc(folders.id)))
+    .map(folder => decryptFolder(folder, key))
 
-  const docRows = await db
+  const docRows = (await db
     .select()
     .from(documents)
     .where(and(eq(documents.workspaceId, workspace.id), activeDocsWhere()))
-    .orderBy(asc(documents.position), asc(documents.id))
+    .orderBy(asc(documents.position), asc(documents.id)))
+    .map(doc => decryptDocument(doc, key))
 
   const ordered = orderDocs(folderRows, docRows)
   const buf = await renderWorkspacePdf(workspace.name || 'Workspace', ordered)

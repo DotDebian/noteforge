@@ -14,7 +14,8 @@ const emit = defineEmits<{
 }>()
 
 interface ShareRow {
-  token: string
+  id: string
+  prefix: string | null
   createdAt: string
   expiresAt: string | null
 }
@@ -24,16 +25,20 @@ const loading = ref(false)
 const creating = ref(false)
 const error = ref<string | null>(null)
 const expiryChoice = ref<'never' | '1' | '7' | '30'>('never')
-const copiedToken = ref<string | null>(null)
+
+// The freshly-minted link (relative URL). Shown exactly once — the server
+// stores only the token's hash, so re-opening the dialog can never reproduce
+// it. Cleared when the dialog closes or a new link is created.
+const newLink = ref<string | null>(null)
+const copied = ref(false)
 let copiedTimer: ReturnType<typeof setTimeout> | null = null
 
 const origin = computed(() =>
   typeof window === 'undefined' ? '' : window.location.origin,
 )
-
-function urlFor(token: string): string {
-  return `${origin.value}/share/${token}`
-}
+const newLinkUrl = computed(() =>
+  newLink.value ? `${origin.value}${newLink.value}` : '',
+)
 
 async function load() {
   loading.value = true
@@ -66,12 +71,13 @@ async function createLink() {
       `/api/documents/${props.docId}/share`,
       { method: 'POST', body },
     )
-    // Refresh from server so createdAt / expiresAt are canonical.
+    newLink.value = res.url
+    // Refresh from server so createdAt / expiresAt / prefix are canonical.
     await load()
     // Auto-copy the freshly-minted URL — common share-flow pattern.
     try {
-      await navigator.clipboard.writeText(urlFor(res.token))
-      flashCopied(res.token)
+      await navigator.clipboard.writeText(`${origin.value}${res.url}`)
+      flashCopied()
     }
     catch {
       // Clipboard write can fail in non-secure contexts. Silently ignore.
@@ -85,13 +91,13 @@ async function createLink() {
   }
 }
 
-async function revoke(token: string) {
+async function revoke(id: string) {
   error.value = null
   try {
-    await $fetch(`/api/documents/${props.docId}/share/${token}`, {
+    await $fetch(`/api/documents/${props.docId}/share/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     })
-    shares.value = shares.value.filter(s => s.token !== token)
+    shares.value = shares.value.filter(s => s.id !== id)
     emit('shares-changed', shares.value.length)
   }
   catch (e) {
@@ -99,23 +105,25 @@ async function revoke(token: string) {
   }
 }
 
-async function copy(token: string) {
+async function copyNew() {
+  if (!newLinkUrl.value) return
   try {
-    await navigator.clipboard.writeText(urlFor(token))
-    flashCopied(token)
+    await navigator.clipboard.writeText(newLinkUrl.value)
+    flashCopied()
   }
   catch {
     // No-op; the input is also selectable.
   }
 }
 
-function flashCopied(token: string) {
-  copiedToken.value = token
+function flashCopied() {
+  copied.value = true
   if (copiedTimer) clearTimeout(copiedTimer)
-  copiedTimer = setTimeout(() => { copiedToken.value = null }, 1500)
+  copiedTimer = setTimeout(() => { copied.value = false }, 1500)
 }
 
 function close() {
+  newLink.value = null
   emit('close')
 }
 
@@ -128,7 +136,12 @@ function onKeydown(e: KeyboardEvent) {
 // link is created in-session, so the dialog is the canonical place.
 watch(
   () => props.isOpen,
-  (open) => { if (open) load() },
+  (open) => {
+    if (open) {
+      newLink.value = null
+      load()
+    }
+  },
 )
 
 function formatExpiry(iso: string | null): string {
@@ -186,33 +199,42 @@ function formatExpiry(iso: string | null): string {
 
             <p v-if="error" class="error">{{ error }}</p>
 
+            <section v-if="newLink" class="new-link">
+              <p class="new-link-note">{{ t('share.showOnce') }}</p>
+              <div class="row-main">
+                <input
+                  :value="newLinkUrl"
+                  readonly
+                  class="row-input"
+                  :title="newLinkUrl"
+                  @focus="($event.target as HTMLInputElement).select()"
+                />
+                <button
+                  type="button"
+                  class="ghost-btn ghost-btn--sm"
+                  @click="copyNew"
+                >
+                  {{ copied ? t('share.copied') : t('share.copy') }}
+                </button>
+              </div>
+            </section>
+
             <section class="list" :aria-label="t('share.eyebrow')">
               <p v-if="loading && shares.length === 0" class="muted">{{ t('share.loading') }}</p>
               <p v-else-if="!loading && shares.length === 0" class="muted">
                 {{ t('share.noLinks') }}
               </p>
               <ul v-else class="rows">
-                <li v-for="s in shares" :key="s.token" class="row">
+                <li v-for="s in shares" :key="s.id" class="row">
                   <div class="row-main">
-                    <input
-                      :value="urlFor(s.token)"
-                      readonly
-                      class="row-input"
-                      :title="urlFor(s.token)"
-                      @focus="($event.target as HTMLInputElement).select()"
-                    />
+                    <span class="row-handle" :title="t('share.linkHiddenTitle')">
+                      {{ s.prefix ? `${s.prefix}…` : t('share.linkHandleFallback') }}
+                    </span>
                     <div class="row-actions">
                       <button
                         type="button"
-                        class="ghost-btn ghost-btn--sm"
-                        @click="copy(s.token)"
-                      >
-                        {{ copiedToken === s.token ? t('share.copied') : t('share.copy') }}
-                      </button>
-                      <button
-                        type="button"
                         class="ghost-btn ghost-btn--sm ghost-btn--danger"
-                        @click="revoke(s.token)"
+                        @click="revoke(s.id)"
                       >
                         {{ t('share.revoke') }}
                       </button>
@@ -283,8 +305,24 @@ html.dark .select:focus { border-color: theme('colors.ink.100'); }
   @apply font-sans text-[12px] text-accent-700 dark:text-accent-300 mb-3;
 }
 
+.new-link {
+  @apply rounded p-3 mb-4;
+  border: 1px solid theme('colors.accent.300');
+  background: theme('colors.accent.50' / 60%);
+}
+html.dark .new-link {
+  border-color: theme('colors.accent.600');
+  background: theme('colors.accent.600' / 12%);
+}
+.new-link-note {
+  @apply font-sans text-[12px] leading-relaxed text-ink-700 dark:text-ink-200 mb-2;
+}
+
 .list { @apply mb-5; }
 .muted { @apply text-[13px] text-ink-500 dark:text-ink-400 py-3; }
+.row-handle {
+  @apply flex-1 min-w-0 truncate font-mono text-[12px] text-ink-600 dark:text-ink-300;
+}
 .rows { @apply flex flex-col gap-3 list-none p-0 m-0; }
 .row {
   @apply rounded p-3;

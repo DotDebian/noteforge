@@ -6,7 +6,9 @@ import { useDb } from '~/server/database/client'
 import { documents, folders } from '~/server/database/schema'
 import { assertWorkspaceAccess, parseIdParam } from '~/server/utils/access'
 import { activeDocsWhere, activeFoldersWhere } from '~/server/utils/active'
+import { decryptDocument, decryptFolder } from '~/server/utils/encrypted-entities'
 import { buildHtml, buildMarkdown, slugify } from '~/server/utils/export'
+import { getWorkspaceKeyFromWorkspace } from '~/server/utils/workspace-key'
 
 type ExportFormat = 'markdown' | 'html'
 
@@ -18,23 +20,26 @@ function parseFormat(value: unknown): ExportFormat {
 export default defineEventHandler(async (event) => {
   const id = parseIdParam(event)
   const workspace = await assertWorkspaceAccess(event, id)
+  const key = await getWorkspaceKeyFromWorkspace(event, workspace)
   const db = useDb()
 
   const format = parseFormat(getQuery(event).format)
   const extension = format === 'html' ? 'html' : 'md'
   const renderBody = format === 'html' ? buildHtml : buildMarkdown
 
-  const folderRows = await db
+  const folderRows = (await db
     .select()
     .from(folders)
     .where(and(eq(folders.workspaceId, workspace.id), activeFoldersWhere()))
-    .orderBy(asc(folders.position), asc(folders.id))
+    .orderBy(asc(folders.position), asc(folders.id)))
+    .map(folder => decryptFolder(folder, key))
 
-  const docRows = await db
+  const docRows = (await db
     .select()
     .from(documents)
     .where(and(eq(documents.workspaceId, workspace.id), activeDocsWhere()))
-    .orderBy(asc(documents.position), asc(documents.id))
+    .orderBy(asc(documents.position), asc(documents.id)))
+    .map(doc => decryptDocument(doc, key))
 
   // Build folderId -> path segments (slugified folder names from root down).
   const folderById = new Map<number, typeof folderRows[number]>()

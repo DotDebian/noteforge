@@ -327,7 +327,16 @@ export const attachments = sqliteTable(
 export const shareTokens = sqliteTable(
   'share_tokens',
   {
+    /**
+     * SHA-256 hex of the raw share token. The raw token lives only in the URL —
+     * never persisted — so a stolen `noteforge.db` can't reconstruct a working
+     * link nor (via `wrappedKey`) decrypt the shared document. Lookup by hash =
+     * lookup by primary key.
+     */
     token: text('token').primaryKey(),
+    /** First chars of the raw token: a non-secret display handle in the share
+     *  list. The full URL is shown only once, at creation. Null on legacy rows. */
+    prefix: text('prefix'),
     docId: integer('doc_id')
       .notNull()
       .references(() => documents.id, { onDelete: 'cascade' }),
@@ -339,6 +348,14 @@ export const shareTokens = sqliteTable(
       .default(sql`(unixepoch())`),
     expiresAt: integer('expires_at', { mode: 'timestamp' }),
     revokedAt: integer('revoked_at', { mode: 'timestamp' }),
+    /**
+     * Workspace content key (DEK or WEK) wrapped under a key derived from the
+     * raw token (`deriveTokenWrapKey`). The unauthenticated public reader
+     * re-derives that key from the URL token to decrypt the live document.
+     * Null only for pre-encryption workspaces (no key on the session at share
+     * time) and legacy rows minted before this column existed.
+     */
+    wrappedKey: blob('wrapped_key', { mode: 'buffer' }),
   },
   (t) => ({
     docIdx: index('share_tokens_doc_idx').on(t.docId),

@@ -7,6 +7,11 @@ import { assertDocumentAccess, parseIdParam } from '~/server/utils/access'
 /**
  * Revoke a share token. Stamps `revoked_at`; the public route filters those
  * out so revoking is effective immediately.
+ *
+ * The `[token]` path param is the opaque id surfaced by the list endpoint —
+ * i.e. the SHA-256 hash stored in `share_tokens.token`, not the raw URL token
+ * (which is never persisted). Matching it directly against the stored hash is
+ * exactly what we want.
  */
 export default defineEventHandler(async (event) => {
   const id = parseIdParam(event)

@@ -7,6 +7,10 @@ import { assertDocumentAccess, parseIdParam } from '~/server/utils/access'
 /**
  * List currently-active share tokens for a document. Filters out
  * revoked / expired rows so the client can show a clean list.
+ *
+ * The raw token is never stored (only its SHA-256 hash), so the list can't
+ * reconstruct the share URL — the full link is shown once, at creation. Rows
+ * expose the hash as an opaque `id` (used to revoke) plus a `prefix` handle.
  */
 export default defineEventHandler(async (event) => {
   const id = parseIdParam(event)
@@ -16,7 +20,8 @@ export default defineEventHandler(async (event) => {
   const now = new Date()
   const rows = await db
     .select({
-      token: shareTokens.token,
+      id: shareTokens.token,
+      prefix: shareTokens.prefix,
       createdAt: shareTokens.createdAt,
       expiresAt: shareTokens.expiresAt,
     })
