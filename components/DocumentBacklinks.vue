@@ -79,6 +79,19 @@ html.dark .backlinks-panel {
   @apply flex flex-col;
 }
 
+/* Desktop rail: the rail is overflow-hidden and the Insights panel above is
+   flex-1, so this block must bound itself — cap at ~4 rows, scroll inside.
+   Mobile (DocInsightsSheet) keeps natural height. */
+@media (min-width: 1024px) {
+  .backlinks-panel {
+    flex-shrink: 0;
+  }
+  .backlinks-list {
+    max-height: 7.5rem;
+    overflow-y: auto;
+  }
+}
+
 .backlinks-row {
   @apply w-full text-left text-sm py-1 px-2 rounded text-ink-600 dark:text-ink-300 transition-colors;
 }

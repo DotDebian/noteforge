@@ -230,10 +230,15 @@ html.dark .outline-panel {
 
 /* Desktop: cap the outline so a heading-heavy doc doesn't squeeze the
    Insights / Backlinks panels out of the rail. The list scrolls internally;
-   on mobile (DocInsightsSheet) the natural height is fine. */
+   on mobile (DocInsightsSheet) the natural height is fine. Kept deliberately
+   low (~5-6 headings) — the outline is the least important rail block; the
+   Insights panel gets the remaining height (.doc-rail is overflow-hidden). */
 @media (min-width: 1024px) {
+  .outline-panel {
+    flex-shrink: 0;
+  }
   .outline-list {
-    max-height: calc(33vh - 3.25rem);
+    max-height: min(20vh, 11rem);
     overflow-y: auto;
   }
 }

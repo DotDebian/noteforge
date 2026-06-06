@@ -673,10 +673,15 @@ html.dark .ghost-btn:hover {
 }
 
 .doc-rail {
-  @apply relative hidden lg:flex flex-col shrink-0 overflow-auto;
+  @apply relative hidden lg:flex flex-col shrink-0 overflow-hidden;
   /* Width is user-resizable (bound inline, persisted, clamped 280–640px).
      378px default = enough for Summary / Tags / Use cases / Questions /
      Actions to sit on a single line with the panel's p-4 padding. */
+  /* overflow-hidden (not auto): the rail itself never scrolls — each block
+     manages its own space. Outline + Backlinks cap themselves with internal
+     scroll, the Insights panel takes the remaining height (flex-1) and
+     scrolls its tab content + related list independently, so a long related
+     list can never crush the analysis area (and vice versa). */
   border-left: 1px solid theme('colors.ink.200' / 60%);
   background: theme('colors.ink.50');
 }

@@ -282,8 +282,13 @@ function formatScore(n: number): string {
 </script>
 
 <template>
-  <aside class="flex h-full w-full flex-col gap-4 overflow-y-auto bg-ink-50/60 p-4 text-sm text-ink-800 dark:bg-ink-900/60 dark:text-ink-200">
-    <header class="flex items-center justify-between gap-2">
+  <!-- Mobile (DocInsightsSheet): natural height, the sheet body scrolls.
+       Desktop rail (lg+): the rail is overflow-hidden and this panel is the
+       flex-1 block — it owns the leftover height and scrolls internally
+       (tab content + related list each scroll on their own; header, tab nav
+       and the related card stay pinned). -->
+  <aside class="flex h-full w-full flex-col gap-4 overflow-y-auto bg-ink-50/60 p-4 text-sm text-ink-800 dark:bg-ink-900/60 dark:text-ink-200 lg:h-auto lg:min-h-0 lg:flex-1 lg:overflow-hidden">
+    <header class="flex shrink-0 items-center justify-between gap-2">
       <div class="flex min-w-0 items-center gap-2">
         <h2 class="font-serif text-base font-semibold text-ink-900 dark:text-ink-50">{{ t('insights.title') }}</h2>
         <!-- Refreshing pill — auto-reanalysis in flight. Does NOT replace
@@ -319,7 +324,7 @@ function formatScore(n: number): string {
     <!-- Embed-status row: visible whenever we have a status payload. -->
     <div
       v-if="embedStatus"
-      class="flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-xs"
+      class="flex shrink-0 items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-xs"
       :class="embedStatus.error
         ? 'border-red-200 bg-red-50 text-red-800 dark:border-red-900/60 dark:bg-red-900/20 dark:text-red-200'
         : embedStatus.indexed
@@ -381,10 +386,12 @@ function formatScore(n: number): string {
       </button>
     </section>
 
-    <!-- Populated state -->
-    <template v-else-if="analysis">
+    <!-- Populated state. Desktop: flex-1 so the analysis block absorbs the
+         leftover rail height; the tab nav stays pinned and only the active
+         tab's content scrolls. Mobile: plain flow, the sheet scrolls. -->
+    <div v-else-if="analysis" class="flex flex-col gap-4 lg:min-h-0 lg:flex-1">
       <!-- Tabs (single row at 378px+ rail) -->
-      <nav class="flex flex-nowrap gap-1 overflow-x-auto border-b border-ink-200 text-xs dark:border-ink-800">
+      <nav class="flex shrink-0 flex-nowrap gap-1 overflow-x-auto border-b border-ink-200 text-xs dark:border-ink-800">
         <button
           v-for="tab in tabs"
           :key="tab"
@@ -398,92 +405,98 @@ function formatScore(n: number): string {
         </button>
       </nav>
 
-      <!-- Summary tab -->
-      <section v-show="activeTab === 'summary'" class="space-y-3">
-        <div>
-          <h3 class="label-mono mb-1">{{ t('insights.summary.tldr') }}</h3>
-          <p class="text-ink-900 dark:text-ink-100">{{ analysis.summaryShort || '—' }}</p>
-        </div>
-        <div>
-          <h3 class="label-mono mb-1">{{ t('insights.summary.full') }}</h3>
-          <p class="whitespace-pre-line text-ink-700 dark:text-ink-200">{{ analysis.summaryLong || '—' }}</p>
-        </div>
-        <p v-if="analysis.language" class="text-xs text-ink-400 dark:text-ink-500">
-          {{ t('insights.summary.language', { lang: analysis.language }) }}
-        </p>
-      </section>
+      <!-- Scroll container for the active tab's content (desktop only —
+           keeps the tab nav visible no matter how long the content is). -->
+      <div class="lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
 
-      <!-- Tags -->
-      <section v-show="activeTab === 'tags'" class="flex flex-wrap gap-1.5">
-        <span v-if="analysis.tags.length === 0" class="text-ink-400 dark:text-ink-500">{{ t('insights.tags.none') }}</span>
-        <span
-          v-for="t in analysis.tags"
-          :key="t"
-          class="rounded-full bg-accent-100 px-2.5 py-0.5 text-xs font-medium text-accent-800 dark:bg-accent-900/40 dark:text-accent-200"
-        >
-          #{{ t }}
-        </span>
-      </section>
+        <!-- Summary tab -->
+        <section v-show="activeTab === 'summary'" class="space-y-3">
+          <div>
+            <h3 class="label-mono mb-1">{{ t('insights.summary.tldr') }}</h3>
+            <p class="text-ink-900 dark:text-ink-100">{{ analysis.summaryShort || '—' }}</p>
+          </div>
+          <div>
+            <h3 class="label-mono mb-1">{{ t('insights.summary.full') }}</h3>
+            <p class="whitespace-pre-line text-ink-700 dark:text-ink-200">{{ analysis.summaryLong || '—' }}</p>
+          </div>
+          <p v-if="analysis.language" class="text-xs text-ink-400 dark:text-ink-500">
+            {{ t('insights.summary.language', { lang: analysis.language }) }}
+          </p>
+        </section>
 
-      <!-- Use cases -->
-      <section v-show="activeTab === 'useCases'">
-        <ul v-if="analysis.useCases.length" class="space-y-2">
-          <li
-            v-for="(uc, i) in analysis.useCases"
-            :key="i"
-            class="flex gap-2 rounded-md bg-white p-2 shadow-sm ring-1 ring-ink-100 dark:bg-ink-800 dark:ring-ink-700/60"
+        <!-- Tags -->
+        <section v-show="activeTab === 'tags'" class="flex flex-wrap gap-1.5">
+          <span v-if="analysis.tags.length === 0" class="text-ink-400 dark:text-ink-500">{{ t('insights.tags.none') }}</span>
+          <span
+            v-for="t in analysis.tags"
+            :key="t"
+            class="rounded-full bg-accent-100 px-2.5 py-0.5 text-xs font-medium text-accent-800 dark:bg-accent-900/40 dark:text-accent-200"
           >
-            <span class="text-accent-500">→</span>
-            <span class="text-ink-800 dark:text-ink-200">{{ uc }}</span>
-          </li>
-        </ul>
-        <p v-else class="text-ink-400 dark:text-ink-500">{{ t('insights.useCases.none') }}</p>
-      </section>
+            #{{ t }}
+          </span>
+        </section>
 
-      <!-- Questions -->
-      <section v-show="activeTab === 'questions'">
-        <ul v-if="analysis.questions.length" class="space-y-2">
-          <li v-for="(q, i) in analysis.questions" :key="i">
-            <button
-              class="w-full rounded-md border border-ink-200 bg-white p-2 text-left text-ink-800 transition hover:border-accent-300 hover:bg-accent-50 dark:border-ink-800 dark:bg-ink-800 dark:text-ink-200 dark:hover:border-accent-500 dark:hover:bg-ink-800/80"
-              @click="askQuestion(q)"
+        <!-- Use cases -->
+        <section v-show="activeTab === 'useCases'">
+          <ul v-if="analysis.useCases.length" class="space-y-2">
+            <li
+              v-for="(uc, i) in analysis.useCases"
+              :key="i"
+              class="flex gap-2 rounded-md bg-white p-2 shadow-sm ring-1 ring-ink-100 dark:bg-ink-800 dark:ring-ink-700/60"
             >
-              <span class="mr-1 text-accent-500">?</span>{{ q }}
-            </button>
-          </li>
-        </ul>
-        <p v-else class="text-ink-400 dark:text-ink-500">{{ t('insights.questions.none') }}</p>
-      </section>
+              <span class="text-accent-500">→</span>
+              <span class="text-ink-800 dark:text-ink-200">{{ uc }}</span>
+            </li>
+          </ul>
+          <p v-else class="text-ink-400 dark:text-ink-500">{{ t('insights.useCases.none') }}</p>
+        </section>
 
-      <!-- Action items -->
-      <section v-show="activeTab === 'actions'">
-        <ul v-if="analysis.actionItems.length" class="space-y-1.5">
-          <li
-            v-for="(it, i) in analysis.actionItems"
-            :key="i"
-          >
-            <label class="flex cursor-pointer items-start gap-2">
-              <input
-                type="checkbox"
-                :checked="it.done"
-                class="mt-0.5 h-4 w-4 rounded border-ink-300 text-accent-500 focus:ring-accent-400 dark:border-ink-700"
-                @change="toggleActionItem(i)"
+        <!-- Questions -->
+        <section v-show="activeTab === 'questions'">
+          <ul v-if="analysis.questions.length" class="space-y-2">
+            <li v-for="(q, i) in analysis.questions" :key="i">
+              <button
+                class="w-full rounded-md border border-ink-200 bg-white p-2 text-left text-ink-800 transition hover:border-accent-300 hover:bg-accent-50 dark:border-ink-800 dark:bg-ink-800 dark:text-ink-200 dark:hover:border-accent-500 dark:hover:bg-ink-800/80"
+                @click="askQuestion(q)"
               >
-              <span
-                class="text-ink-800 dark:text-ink-200"
-                :class="it.done ? 'line-through text-ink-400 dark:text-ink-500' : ''"
-              >
-                {{ it.text }}
-              </span>
-            </label>
-          </li>
-        </ul>
-        <p v-else class="text-ink-400 dark:text-ink-500">{{ t('insights.actions.none') }}</p>
-      </section>
-    </template>
+                <span class="mr-1 text-accent-500">?</span>{{ q }}
+              </button>
+            </li>
+          </ul>
+          <p v-else class="text-ink-400 dark:text-ink-500">{{ t('insights.questions.none') }}</p>
+        </section>
 
-    <!-- Related notes -->
-    <section class="mt-4 border-t border-ink-200 pt-4 dark:border-ink-800/60">
+        <!-- Action items -->
+        <section v-show="activeTab === 'actions'">
+          <ul v-if="analysis.actionItems.length" class="space-y-1.5">
+            <li
+              v-for="(it, i) in analysis.actionItems"
+              :key="i"
+            >
+              <label class="flex cursor-pointer items-start gap-2">
+                <input
+                  type="checkbox"
+                  :checked="it.done"
+                  class="mt-0.5 h-4 w-4 rounded border-ink-300 text-accent-500 focus:ring-accent-400 dark:border-ink-700"
+                  @change="toggleActionItem(i)"
+                >
+                <span
+                  class="text-ink-800 dark:text-ink-200"
+                  :class="it.done ? 'line-through text-ink-400 dark:text-ink-500' : ''"
+                >
+                  {{ it.text }}
+                </span>
+              </label>
+            </li>
+          </ul>
+          <p v-else class="text-ink-400 dark:text-ink-500">{{ t('insights.actions.none') }}</p>
+        </section>
+      </div>
+    </div>
+
+    <!-- Related notes — pinned at the bottom on desktop; the list caps at
+         ~2 cards (3rd peeks to signal scrollability) and scrolls inside. -->
+    <section class="mt-4 shrink-0 border-t border-ink-200 pt-4 dark:border-ink-800/60">
       <header class="mb-2 flex items-center justify-between">
         <h3 class="font-serif text-sm font-semibold text-ink-900 dark:text-ink-50">{{ t('insights.related.title') }}</h3>
         <button
@@ -494,7 +507,7 @@ function formatScore(n: number): string {
           {{ loadingRelated ? '…' : t('insights.related.refresh') }}
         </button>
       </header>
-      <ul v-if="related.length" class="space-y-1.5">
+      <ul v-if="related.length" class="space-y-1.5 lg:max-h-48 lg:overflow-y-auto">
         <li v-for="r in related" :key="r.docId">
           <button
             class="block w-full rounded-md border border-ink-200 bg-white p-2 text-left transition hover:border-accent-300 hover:bg-accent-50 dark:border-ink-800 dark:bg-ink-800 dark:hover:border-accent-500 dark:hover:bg-ink-800/80"
