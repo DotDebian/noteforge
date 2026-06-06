@@ -386,10 +386,12 @@ function formatScore(n: number): string {
       </button>
     </section>
 
-    <!-- Populated state. Desktop: flex-1 so the analysis block absorbs the
-         leftover rail height; the tab nav stays pinned and only the active
-         tab's content scrolls. Mobile: plain flow, the sheet scrolls. -->
-    <div v-else-if="analysis" class="flex flex-col gap-4 lg:min-h-0 lg:flex-1">
+    <!-- Populated state. Desktop: natural height (flex 0 1 auto) — the block
+         is exactly as tall as the active tab's content, freeing the leftover
+         for the related list. When space runs out it shrinks (proportionally
+         with the related block, each towards its own floor) and the tab
+         content scrolls under the pinned nav. Mobile: plain flow. -->
+    <div v-else-if="analysis" class="flex flex-col gap-4 lg:min-h-0">
       <!-- Tabs (single row at 378px+ rail) -->
       <nav class="flex shrink-0 flex-nowrap gap-1 overflow-x-auto border-b border-ink-200 text-xs dark:border-ink-800">
         <button
@@ -406,8 +408,9 @@ function formatScore(n: number): string {
       </nav>
 
       <!-- Scroll container for the active tab's content (desktop only —
-           keeps the tab nav visible no matter how long the content is). -->
-      <div class="lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+           keeps the tab nav visible no matter how long the content is).
+           min-h-24 = the floor the analysis can shrink to before scrolling. -->
+      <div class="lg:min-h-24 lg:overflow-y-auto">
 
         <!-- Summary tab -->
         <section v-show="activeTab === 'summary'" class="space-y-3">
@@ -494,10 +497,11 @@ function formatScore(n: number): string {
       </div>
     </div>
 
-    <!-- Related notes — pinned at the bottom on desktop; the list caps at
-         ~2 cards (3rd peeks to signal scrollability) and scrolls inside. -->
-    <section class="mt-4 shrink-0 border-t border-ink-200 pt-4 dark:border-ink-800/60">
-      <header class="mb-2 flex items-center justify-between">
+    <!-- Related notes — natural height on desktop: shows every card when the
+         analysis above leaves room, and shrinks down to a ~2-card floor
+         (scrolling inside) when space gets tight. -->
+    <section class="mt-4 border-t border-ink-200 pt-4 dark:border-ink-800/60 lg:flex lg:min-h-0 lg:flex-col">
+      <header class="mb-2 flex shrink-0 items-center justify-between">
         <h3 class="font-serif text-sm font-semibold text-ink-900 dark:text-ink-50">{{ t('insights.related.title') }}</h3>
         <button
           class="text-xs text-ink-500 hover:text-ink-800 dark:text-ink-400 dark:hover:text-ink-100"
@@ -507,7 +511,7 @@ function formatScore(n: number): string {
           {{ loadingRelated ? '…' : t('insights.related.refresh') }}
         </button>
       </header>
-      <ul v-if="related.length" class="space-y-1.5 lg:max-h-48 lg:overflow-y-auto">
+      <ul v-if="related.length" class="space-y-1.5 lg:min-h-[9.5rem] lg:overflow-y-auto">
         <li v-for="r in related" :key="r.docId">
           <button
             class="block w-full rounded-md border border-ink-200 bg-white p-2 text-left transition hover:border-accent-300 hover:bg-accent-50 dark:border-ink-800 dark:bg-ink-800 dark:hover:border-accent-500 dark:hover:bg-ink-800/80"
