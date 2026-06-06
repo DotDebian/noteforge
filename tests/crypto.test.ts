@@ -150,7 +150,7 @@ describe('X25519 sealed box (workspace sharing)', () => {
     const kp = generateUserKeyPair()
     const sealed = Buffer.from(sealForPublicKey(generateWek(), kp.publicKey))
     // Flip a single byte in the ciphertext region (after ephemeralPub + iv + tag).
-    sealed[sealed.byteLength - 1] = sealed[sealed.byteLength - 1] ^ 0x01
+    sealed[sealed.byteLength - 1] = (sealed[sealed.byteLength - 1] ?? 0) ^ 0x01
     expect(() => openSealed(sealed, kp.privateKey, kp.publicKey)).toThrow()
   })
 
