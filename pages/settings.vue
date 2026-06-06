@@ -110,6 +110,15 @@ const L = computed(() => locale.value === 'fr'
         errorAlreadyEnabled: 'La 2FA est déjà activée.',
         secretLabel: 'Clé secrète',
       },
+      debug: {
+        title: 'Diagnostic',
+        lede: 'Outils de débogage pour analyser la pertinence des notes liées.',
+        relatedBtn: 'Copier le diagnostic des notes liées',
+        relatedHint: 'Copie dans le presse-papiers un rapport JSON complet : état des embeddings par document (résumé + chunks), matrice de similarité cosinus entre tous les documents, tags, liens, et une simulation du calcul « notes liées » pour chaque document. Rien n’est envoyé à un serveur tiers.',
+        busy: 'Génération…',
+        copied: 'Copié dans le presse-papiers',
+        errorGeneric: 'Impossible de générer le diagnostic.',
+      },
     }
   : {
       editor: {
@@ -183,6 +192,15 @@ const L = computed(() => locale.value === 'fr'
         errorInvalidPassword: 'Wrong password.',
         errorAlreadyEnabled: '2FA is already enabled.',
         secretLabel: 'Secret key',
+      },
+      debug: {
+        title: 'Diagnostics',
+        lede: 'Debug tooling for the related-notes relevance pipeline.',
+        relatedBtn: 'Copy related-notes diagnostics',
+        relatedHint: 'Copies a full JSON report to the clipboard: per-document embedding state (summary + chunks), the pairwise cosine-similarity matrix across all documents, tags, links, and a simulation of the related-notes scoring for every document. Nothing is sent to any third party.',
+        busy: 'Generating…',
+        copied: 'Copied to clipboard',
+        errorGeneric: 'Could not generate the diagnostics report.',
       },
     },
 )
@@ -365,6 +383,48 @@ function setAnalysisDone(v: boolean) {
 }
 
 const tempDisplay = computed(() => aiPrefs.value.temperature.toFixed(1))
+
+/* -------------------------------------------------------------------- */
+/*  Debug — related-notes diagnostics export                             */
+/* -------------------------------------------------------------------- */
+
+const debugBusy = ref(false)
+const debugCopied = ref(false)
+const debugMeta = ref<string | null>(null)
+const debugError = ref<string | null>(null)
+let debugCopiedTimer: ReturnType<typeof setTimeout> | null = null
+
+interface DebugWorkspaceCounts {
+  counts?: { activeDocs?: number, docsWithSummaryEmbedding?: number }
+}
+
+async function copyRelatedDebug(): Promise<void> {
+  debugBusy.value = true
+  debugError.value = null
+  debugCopied.value = false
+  debugMeta.value = null
+  try {
+    const res = await $fetch<{ report: { workspaces?: DebugWorkspaceCounts[] } }>('/api/ai/debug/related')
+    const json = JSON.stringify(res.report, null, 2)
+    await navigator.clipboard.writeText(json)
+    const wsList = res.report.workspaces ?? []
+    const docCount = wsList.reduce((s, w) => s + (w.counts?.activeDocs ?? 0), 0)
+    const sizeKb = Math.max(1, Math.round(json.length / 1024))
+    debugMeta.value = `${wsList.length} ws · ${docCount} docs · ${sizeKb} Ko`
+    debugCopied.value = true
+    if (debugCopiedTimer) clearTimeout(debugCopiedTimer)
+    debugCopiedTimer = setTimeout(() => { debugCopied.value = false }, 6000)
+  }
+  catch (err) {
+    debugError.value
+      = (err as { data?: { statusMessage?: string } })?.data?.statusMessage
+        ?? (err as Error).message
+        ?? L.value.debug.errorGeneric
+  }
+  finally {
+    debugBusy.value = false
+  }
+}
 
 /* -------------------------------------------------------------------- */
 /*  2FA — enrollment + disable flow                                      */
@@ -895,6 +955,27 @@ watch(enrollOpen, (open) => {
           <button type="button" class="settings-btn" @click="mcpDialogOpen = true">
             {{ t('settings.security.manageMcp') }}
           </button>
+        </div>
+      </section>
+
+      <!-- Debug / diagnostics -->
+      <section class="settings-card settings-card--wide">
+        <h2 class="settings-section-title">{{ L.debug.title }}</h2>
+        <p class="settings-text">{{ L.debug.lede }}</p>
+        <p class="settings-hint settings-hint--block">{{ L.debug.relatedHint }}</p>
+        <div class="settings-actions">
+          <button
+            type="button"
+            class="settings-btn"
+            :disabled="debugBusy"
+            @click="copyRelatedDebug"
+          >
+            {{ debugBusy ? L.debug.busy : L.debug.relatedBtn }}
+          </button>
+          <span v-if="debugCopied" class="settings-ok">
+            {{ L.debug.copied }}<template v-if="debugMeta"> · {{ debugMeta }}</template>
+          </span>
+          <span v-if="debugError" class="settings-err">{{ debugError }}</span>
         </div>
       </section>
     </div>
