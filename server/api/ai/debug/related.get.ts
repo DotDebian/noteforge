@@ -16,6 +16,15 @@ import {
   decryptWorkspace,
 } from '~/server/utils/encrypted-entities'
 import { getDek } from '~/server/utils/dek'
+import {
+  DISPLAY_CEIL,
+  DISPLAY_FLOOR,
+  jaccard,
+  LINK_BONUS,
+  MIN_COSINE,
+  TAG_WEIGHT,
+  TOP_K,
+} from '~/server/utils/related-scoring'
 import { requireUser } from '~/server/utils/require-user'
 import { getWorkspaceKeyFromWorkspace } from '~/server/utils/workspace-key'
 import { bufferToFloats, cosineSimilarity, loadEmbedding, meanVector } from '~/server/utils/vector'
@@ -34,10 +43,6 @@ import { bufferToFloats, cosineSimilarity, loadEmbedding, meanVector } from '~/s
  * sync if that endpoint changes. Read-only; session-authenticated.
  */
 
-/* Constants mirrored from `ai/related/[docId].get.ts` — keep in sync. */
-const TOP_K = 5
-const TAG_WEIGHT = 0.15
-const LINK_BONUS = 0.1
 /** Hard cap on the pairwise list size to keep the payload pasteable. */
 const PAIR_LIMIT = 4000
 
@@ -49,26 +54,25 @@ interface SimHit {
   /** 'summary' = Path A (summary embedding), 'chunks' = Path B fallback. */
   path: 'summary' | 'chunks'
   cosine: number
+  /** True when the raw cosine clears MIN_COSINE (i.e. the hit is returned). */
+  passesFloor: boolean
   tagJaccard: number
   tagBonus: number
   linkBonus: number
   finalScore: number
-  /** What the UI shows today: round(finalScore × 100). */
+  /** What the UI shows: finalScore renormalised over [DISPLAY_FLOOR, DISPLAY_CEIL]. */
   displayedPercent: number
+}
+
+function displayPercent(finalScore: number): number {
+  const t = (finalScore - DISPLAY_FLOOR) / (DISPLAY_CEIL - DISPLAY_FLOOR)
+  return Math.round(Math.min(1, Math.max(0, t)) * 100)
 }
 
 function l2norm(v: number[]): number {
   let acc = 0
   for (const x of v) acc += x * x
   return Math.sqrt(acc)
-}
-
-function jaccard(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
-  if (a.size === 0 || b.size === 0) return 0
-  let inter = 0
-  for (const t of a) if (b.has(t)) inter++
-  const union = a.size + b.size - inter
-  return union === 0 ? 0 : inter / union
 }
 
 function round(n: number, digits = 4): number {
@@ -301,7 +305,13 @@ export default defineEventHandler(async (event) => {
       const queryVec = summaryVecByDoc.get(queryDoc.id)
         ?? meanVector(chunkVecsByDoc.get(queryDoc.id) ?? [])
       if (queryVec.length === 0) {
-        return { docId: queryDoc.id, title: queryDoc.title, queryVectorSource: queryDoc.queryVectorSource, hits: [] as SimHit[] }
+        return {
+          docId: queryDoc.id,
+          title: queryDoc.title,
+          queryVectorSource: queryDoc.queryVectorSource,
+          hits: [] as SimHit[],
+          nearMisses: [] as SimHit[],
+        }
       }
 
       const queryTags = tagsByDoc.get(queryDoc.id) ?? new Set<string>()
@@ -332,11 +342,12 @@ export default defineEventHandler(async (event) => {
           title: cand.title,
           path,
           cosine: round(cosine),
+          passesFloor: cosine >= MIN_COSINE,
           tagJaccard: round(tagJaccard),
           tagBonus: round(TAG_WEIGHT * tagJaccard),
           linkBonus,
           finalScore: round(finalScore),
-          displayedPercent: Math.round(finalScore * 100),
+          displayedPercent: displayPercent(finalScore),
         })
       }
       hits.sort((x, y) => y.finalScore - x.finalScore)
@@ -344,7 +355,10 @@ export default defineEventHandler(async (event) => {
         docId: queryDoc.id,
         title: queryDoc.title,
         queryVectorSource: queryDoc.queryVectorSource,
-        hits: hits.slice(0, TOP_K),
+        /** What the endpoint actually returns (floor applied, TOP_K). */
+        hits: hits.filter(h => h.passesFloor).slice(0, TOP_K),
+        /** Best candidates killed by the floor — calibration aid. */
+        nearMisses: hits.filter(h => !h.passesFloor).slice(0, 3),
       }
     })
 
@@ -390,8 +404,10 @@ export default defineEventHandler(async (event) => {
         TOP_K,
         TAG_WEIGHT,
         LINK_BONUS,
-        minScoreThreshold: null,
-        uiScoreFormula: 'round(finalScore * 100) — raw cosine, not renormalised',
+        MIN_COSINE,
+        DISPLAY_FLOOR,
+        DISPLAY_CEIL,
+        uiScoreFormula: 'clamp((finalScore - DISPLAY_FLOOR) / (DISPLAY_CEIL - DISPLAY_FLOOR)) * 100',
       },
       workspaces: workspaceReports,
     },

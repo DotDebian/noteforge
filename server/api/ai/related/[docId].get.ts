@@ -11,6 +11,13 @@ import {
   decryptChunkText,
   decryptDocument,
 } from '~/server/utils/encrypted-entities'
+import {
+  jaccard,
+  LINK_BONUS,
+  MIN_COSINE,
+  TAG_WEIGHT,
+  TOP_K,
+} from '~/server/utils/related-scoring'
 import { bufferToFloats, cosineSimilarity, loadEmbedding, meanVector } from '~/server/utils/vector'
 
 interface RelatedHit {
@@ -20,25 +27,12 @@ interface RelatedHit {
   snippet: string
 }
 
-const TOP_K = 5
 const SNIPPET_MAX = 240
-/** Weight applied to tag-overlap (Jaccard) on top of cosine similarity. */
-const TAG_WEIGHT = 0.15
-/** Flat bonus for candidates explicitly linked to/from the query doc. */
-const LINK_BONUS = 0.1
 
 function makeSnippet(text: string): string {
   const cleaned = text.replace(/\s+/g, ' ').trim()
   if (cleaned.length <= SNIPPET_MAX) return cleaned
   return `${cleaned.slice(0, SNIPPET_MAX - 1).trimEnd()}…`
-}
-
-function jaccard(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
-  if (a.size === 0 || b.size === 0) return 0
-  let inter = 0
-  for (const t of a) if (b.has(t)) inter++
-  const union = a.size + b.size - inter
-  return union === 0 ? 0 : inter / union
 }
 
 /**
@@ -53,6 +47,10 @@ function jaccard(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
  * Fallback path — for docs without a `summary_embedding` yet: max-of-chunks
  *   cosine — the single best-matching chunk is the doc's representative
  *   (a mean would dilute the signal across boilerplate paragraphs).
+ *
+ * Candidates whose raw cosine sits below MIN_COSINE are dropped entirely —
+ * mistral-embed's anisotropy puts unrelated docs at ~0.73-0.76 already, so
+ * without the floor the panel fills with noise (see related-scoring.ts).
  *
  * On top of the cosine score we add two non-semantic signals (only when
  * tag / link data is available):
@@ -167,6 +165,10 @@ export default defineEventHandler(async (event) => {
   for (const [otherDocId, { score: cosine, snippet }] of best) {
     const title = titleById.get(otherDocId)
     if (title == null) continue
+    // Relevance floor on the RAW cosine — bonuses must not be able to push
+    // a semantically-unrelated doc into the panel. See `related-scoring.ts`
+    // for the calibration data behind the constant.
+    if (cosine < MIN_COSINE) continue
     const tagOverlap = jaccard(queryTags, tagsByCandidate.get(otherDocId) ?? new Set())
     const linkBonus = linkedDocs.has(otherDocId) ? LINK_BONUS : 0
     const score = cosine + TAG_WEIGHT * tagOverlap + linkBonus

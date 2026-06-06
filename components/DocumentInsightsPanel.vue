@@ -265,8 +265,19 @@ watch(() => props.docId, async () => {
   await loadEmbedStatus()
 }, { immediate: true })
 
+/**
+ * Renormalise the related score for display. Raw mistral-embed cosines
+ * compress into ~[0.65, 0.95] (two unrelated docs already sit at ~0.75), so
+ * showing them as-is made everything read "75%+". Map that window onto
+ * 0-100% instead. Keep in sync with `server/utils/related-scoring.ts`
+ * (DISPLAY_FLOOR / DISPLAY_CEIL).
+ */
+const SCORE_DISPLAY_FLOOR = 0.65
+const SCORE_DISPLAY_CEIL = 0.95
+
 function formatScore(n: number): string {
-  return `${Math.round(n * 100)}%`
+  const t = (n - SCORE_DISPLAY_FLOOR) / (SCORE_DISPLAY_CEIL - SCORE_DISPLAY_FLOOR)
+  return `${Math.round(Math.min(1, Math.max(0, t)) * 100)}%`
 }
 </script>
 
