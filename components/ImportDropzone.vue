@@ -29,6 +29,12 @@ interface ImportResponse {
   folders: { id: number, name: string, parentId: number | null }[]
 }
 
+/** What to surface to the user once the busy overlay is down. */
+interface ImportOutcome {
+  title: string
+  message: string
+}
+
 function hasFileItems(e: DragEvent): boolean {
   const types = e.dataTransfer?.types
   if (!types) return false
@@ -73,103 +79,114 @@ async function onDrop(e: DragEvent) {
   if (!e.dataTransfer) return
 
   importing.value = true
+  let outcome: ImportOutcome
   try {
-    const collected: CollectedFile[] = []
-    const items = e.dataTransfer.items
-    if (items && items.length > 0) {
-      const promises: Promise<void>[] = []
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i]
-        if (!item || item.kind !== 'file') continue
-        // webkitGetAsEntry is non-standard but widely supported in evergreen
-        // browsers — feature-detect.
-        const entry = typeof (item as { webkitGetAsEntry?: () => unknown }).webkitGetAsEntry === 'function'
-          ? (item as { webkitGetAsEntry: () => FileSystemEntry | null }).webkitGetAsEntry()
-          : null
-        if (entry) {
-          promises.push(walkEntry(entry, '', collected, 0))
-        }
-        else {
-          const file = item.getAsFile()
-          if (file) {
-            const content = await readFileText(file)
-            collected.push({ path: file.name, content })
-          }
-        }
-      }
-      await Promise.all(promises)
-    }
-    else if (e.dataTransfer.files) {
-      // Fallback: flat file list (no folder structure).
-      for (let i = 0; i < e.dataTransfer.files.length; i++) {
-        const file = e.dataTransfer.files[i]
-        if (!file) continue
-        if (!hasAllowedExt(file.name)) continue
-        const content = await readFileText(file)
-        collected.push({ path: file.name, content })
-      }
-    }
-
-    if (collected.length === 0) {
-      await dialog.alert({
-        title: t('import.noFilesTitle'),
-        message: t('import.noFilesMsg'),
-      })
-      return
-    }
-
-    if (collected.length > MAX_FILES) {
-      await dialog.alert({
-        title: t('import.tooManyTitle'),
-        message: t('import.tooManyMsg', { max: MAX_FILES, n: collected.length }),
-      })
-      return
-    }
-
-    let bytes = 0
-    for (const f of collected) bytes += new Blob([f.content]).size
-    if (bytes > MAX_BYTES) {
-      await dialog.alert({
-        title: t('import.tooLargeTitle'),
-        message: t('import.tooLargeMsg', { mb: Math.round(MAX_BYTES / (1024 * 1024)) }),
-      })
-      return
-    }
-
-    const res = await $fetch<ImportResponse>('/api/import/markdown', {
-      method: 'POST',
-      body: {
-        workspaceId,
-        parentFolderId: null,
-        files: collected,
-      },
-    })
-
-    await treeStore.fetchWorkspaceTree(workspaceId, true)
-    const docsPart = res.documents.length === 1
-      ? t('import.completeOneDoc')
-      : t('import.completeDocs', { n: res.documents.length })
-    const foldersPart = res.folders.length === 0
-      ? t('import.completePeriod')
-      : res.folders.length === 1
-        ? t('import.completeOneFolder')
-        : t('import.completeFolders', { n: res.folders.length })
-    await dialog.alert({
-      title: t('import.completeTitle'),
-      message: `${docsPart}${foldersPart}`,
-    })
+    outcome = await collectAndImport(e.dataTransfer, workspaceId)
   }
   catch (err) {
     const msg = err instanceof Error
       ? err.message
       : (err as { statusMessage?: string })?.statusMessage ?? 'Unknown error'
-    await dialog.alert({
-      title: t('import.failedTitle'),
-      message: msg,
-    })
+    outcome = { title: t('import.failedTitle'), message: msg }
   }
   finally {
+    // Tear the busy overlay down BEFORE surfacing any dialog — otherwise the
+    // result modal renders behind the still-mounted overlay (z-50 + busy
+    // pointer-events), trapping it (and blocking dismissal).
     importing.value = false
+  }
+
+  await dialog.alert(outcome)
+}
+
+/**
+ * Collect the dropped files, validate, POST to the import endpoint and
+ * refresh the tree. Returns the dialog descriptor to show afterwards —
+ * never opens a dialog itself, so the caller controls timing relative to
+ * the busy overlay.
+ */
+async function collectAndImport(
+  dataTransfer: DataTransfer,
+  workspaceId: number,
+): Promise<ImportOutcome> {
+  const collected: CollectedFile[] = []
+  const items = dataTransfer.items
+  if (items && items.length > 0) {
+    const promises: Promise<void>[] = []
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      if (!item || item.kind !== 'file') continue
+      // webkitGetAsEntry is non-standard but widely supported in evergreen
+      // browsers — feature-detect. Must be called synchronously here, before
+      // any await, while the DataTransferItemList is still alive.
+      const entry = typeof (item as { webkitGetAsEntry?: () => unknown }).webkitGetAsEntry === 'function'
+        ? (item as { webkitGetAsEntry: () => FileSystemEntry | null }).webkitGetAsEntry()
+        : null
+      if (entry) {
+        promises.push(walkEntry(entry, '', collected, 0))
+      }
+      else {
+        const file = item.getAsFile()
+        if (file) {
+          const content = await readFileText(file)
+          collected.push({ path: file.name, content })
+        }
+      }
+    }
+    await Promise.all(promises)
+  }
+  else if (dataTransfer.files) {
+    // Fallback: flat file list (no folder structure).
+    for (let i = 0; i < dataTransfer.files.length; i++) {
+      const file = dataTransfer.files[i]
+      if (!file) continue
+      if (!hasAllowedExt(file.name)) continue
+      const content = await readFileText(file)
+      collected.push({ path: file.name, content })
+    }
+  }
+
+  if (collected.length === 0) {
+    return { title: t('import.noFilesTitle'), message: t('import.noFilesMsg') }
+  }
+
+  if (collected.length > MAX_FILES) {
+    return {
+      title: t('import.tooManyTitle'),
+      message: t('import.tooManyMsg', { max: MAX_FILES, n: collected.length }),
+    }
+  }
+
+  let bytes = 0
+  for (const f of collected) bytes += new Blob([f.content]).size
+  if (bytes > MAX_BYTES) {
+    return {
+      title: t('import.tooLargeTitle'),
+      message: t('import.tooLargeMsg', { mb: Math.round(MAX_BYTES / (1024 * 1024)) }),
+    }
+  }
+
+  const res = await $fetch<ImportResponse>('/api/import/markdown', {
+    method: 'POST',
+    body: {
+      workspaceId,
+      parentFolderId: null,
+      files: collected,
+    },
+  })
+
+  await treeStore.fetchWorkspaceTree(workspaceId, true)
+  const docsPart = res.documents.length === 1
+    ? t('import.completeOneDoc')
+    : t('import.completeDocs', { n: res.documents.length })
+  const foldersPart = res.folders.length === 0
+    ? t('import.completePeriod')
+    : res.folders.length === 1
+      ? t('import.completeOneFolder')
+      : t('import.completeFolders', { n: res.folders.length })
+  return {
+    title: t('import.completeTitle'),
+    message: `${docsPart}${foldersPart}`,
   }
 }
 
