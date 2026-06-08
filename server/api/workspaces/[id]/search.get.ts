@@ -19,8 +19,8 @@ import { getRawDb, useDb } from '~/server/database/client'
 import { docAnalyses, documents } from '~/server/database/schema'
 import { assertWorkspaceAccess, parseIdParam } from '~/server/utils/access'
 import { activeDocsWhere } from '~/server/utils/active'
-import { getDek } from '~/server/utils/dek'
 import { decryptAnalysis, decryptDocument } from '~/server/utils/encrypted-entities'
+import { getWorkspaceKey } from '~/server/utils/workspace-key'
 
 const Query = z.object({
   q: z.string().max(500).optional(),
@@ -94,7 +94,9 @@ export default defineEventHandler(async (event) => {
   const workspaceId = parseIdParam(event)
   await assertWorkspaceAccess(event, workspaceId)
   const q = await getValidatedQuery(event, Query.parse)
-  const dek = await getDek(event)
+  // Workspace key (DEK for solo, WEK for shared) — needed to decrypt titles,
+  // markdown snippets and analysis tags for this workspace.
+  const dek = await getWorkspaceKey(event, workspaceId)
 
   const db = useDb()
   const sqlite = getRawDb()
@@ -170,13 +172,18 @@ export default defineEventHandler(async (event) => {
 
   // Tag filter: once tags are encrypted at rest, the SQL `json_each(...) =
   // ?` predicate can't match (each ciphertext is unique). Compute the
-  // matching doc-id set in JS instead and AND it in.
+  // matching doc-id set in JS instead and AND it in. Scope the scan to THIS
+  // workspace's docs — a global scan would try to decrypt other workspaces'
+  // tags with this workspace's key (GCM auth failure on shared content) and
+  // is needless work besides.
   const tagFilterDocIds: number[] | null = await (async () => {
     if (!q.tag || q.tag.length === 0) return null
     const tag = q.tag.toLowerCase()
     const analyses = await db
       .select({ docId: docAnalyses.docId, tags: docAnalyses.tags })
       .from(docAnalyses)
+      .innerJoin(documents, eq(documents.id, docAnalyses.docId))
+      .where(and(eq(documents.workspaceId, workspaceId), activeDocsWhere()))
     const out: number[] = []
     for (const a of analyses) {
       const tags = decryptAnalysis({ tags: a.tags ?? [] }, dek).tags ?? []

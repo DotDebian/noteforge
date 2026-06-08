@@ -25,6 +25,7 @@ import { z } from 'zod'
 import { useDb } from '~/server/database/client'
 import {
   docAnalyses,
+  docLinks,
   documents,
   documentVersions,
   folders,
@@ -36,7 +37,7 @@ import {
   type Workspace,
   type WorkspaceRole,
 } from '~/server/database/schema'
-import { getWorkspaceKeyForUser } from './workspace-key'
+import { getWorkspaceKeyForUser, type WorkspaceKeyCache } from './workspace-key'
 import {
   assertCanEdit,
   assertDocumentMembership,
@@ -51,7 +52,9 @@ import { embedDocument } from './embed-doc'
 import { extractDocLinks, reconcileDocLinks } from './doc-links'
 import { mistralChat, mistralEmbed } from './mistral'
 import { floatsToBuffer } from './vector'
-import { searchWorkspaceChunks, type SearchHit } from './search'
+import { searchChunkGroups, type SearchChunkGroup, type SearchHit } from './search'
+import { scoreTitleMatch, TITLE_MATCH_MIN_SCORE } from './title-match'
+import { decryptField } from './crypto'
 import {
   decryptAnalysis,
   decryptDocument,
@@ -86,6 +89,31 @@ export interface WorkspaceListItem extends Workspace {
   role: WorkspaceRole
   /** True when the workspace is shared with at least one other user. */
   shared: boolean
+}
+
+/**
+ * Resolve the content key for one workspace inside a multi-workspace sweep
+ * (overview / find / cross-workspace search): DEK for solo workspaces, WEK
+ * for shared ones. A failed WEK unwrap downgrades to `null` (titles stay as
+ * raw envelopes) instead of failing the whole sweep — one broken share must
+ * not take down the other workspaces. Targeted single-entity operations use
+ * `getWorkspaceKeyForUserById` instead, which throws.
+ */
+async function resolveContentKey(
+  workspace: Workspace,
+  userId: number,
+  dek: Buffer | null,
+  cache: WorkspaceKeyCache,
+): Promise<Buffer | null> {
+  if (!dek) return null
+  if (workspace.encryptionMode !== 'wek') return dek
+  try {
+    return await getWorkspaceKeyForUser({ workspace, userId, dek, cache })
+  }
+  catch (err) {
+    console.error('[notes] WEK resolve failed for workspace', workspace.id, err)
+    return null
+  }
 }
 
 /**
@@ -133,19 +161,10 @@ export async function listUserWorkspaces(userId: number, dek: Buffer | null = nu
     : []
   const memberCountByWs = new Map(memberCounts.map(m => [m.workspaceId, m.n]))
 
-  const keyCache = {}
+  const keyCache: WorkspaceKeyCache = {}
   const out: WorkspaceListItem[] = []
   for (const { workspace, role } of byId.values()) {
-    let key: Buffer | null = dek
-    if (dek && workspace.encryptionMode === 'wek') {
-      try {
-        key = await getWorkspaceKeyForUser({ workspace, userId, dek, cache: keyCache })
-      }
-      catch (err) {
-        console.error('[notes/listUserWorkspaces] WEK resolve failed for', workspace.id, err)
-        key = null
-      }
-    }
+    const key = await resolveContentKey(workspace, userId, dek, keyCache)
     const decrypted = decryptWorkspace(workspace, key)
     out.push({
       ...decrypted,
@@ -711,57 +730,490 @@ export interface SearchResult {
   snippet: string
   /** Best-matching sentence inside the chunk relative to the query. */
   highlight: string
-  /** Cosine similarity in [0, 1]. */
+  /** Final relevance score in [0, 1]. */
   score: number
 }
 
+export interface WorkspaceSearchResult extends SearchResult {
+  workspaceId: number
+  workspaceName: string
+}
+
 /**
- * Workspace-scoped semantic search. Mirrors the retrieval logic used by
- * `chat.post.ts` (same MIN_SCORE, top-K, per-doc cap, sqlite-vec → JS-cosine
- * fallback). Skips trashed docs, scoped to the authenticated user's workspace.
+ * Narrow the caller's workspaces to a target scope. `workspaceId`
+ * undefined = every workspace the user can access. An id the user can't
+ * access surfaces the canonical 404/403 from the ownership check rather
+ * than a silent empty result.
+ */
+async function scopeWorkspaces(
+  userId: number,
+  workspaceId: number | undefined,
+  dek: Buffer | null,
+): Promise<WorkspaceListItem[]> {
+  const all = await listUserWorkspaces(userId, dek)
+  if (workspaceId == null) return all
+  const hit = all.find(w => w.id === workspaceId)
+  if (hit) return [hit]
+  await assertWorkspaceOwnership(userId, workspaceId)
+  return []
+}
+
+/**
+ * Semantic search across the user's notes — one workspace when
+ * `workspaceId` is given, ALL accessible workspaces otherwise. Skips
+ * trashed docs. One Mistral embed + one rerank round-trip total,
+ * regardless of workspace count (see `searchChunkGroups`).
  *
  * Used by the `search_notes` MCP tool. The chat endpoint runs the same
- * retrieval internally (via `searchWorkspaceChunks`) — keeping both behind a
- * single primitive means tuning one parameter (e.g. MIN_SCORE) takes effect
- * in both.
+ * retrieval internally (via `rankChunks`) — keeping both behind shared
+ * primitives means tuning one parameter (e.g. MIN_SCORE) takes effect in
+ * both.
  */
-export async function searchUserWorkspace(
+export async function searchUserNotes(
   userId: number,
-  workspaceId: number,
   query: string,
+  options: { workspaceId?: number } = {},
   dek: Buffer | null = null,
-): Promise<SearchResult[]> {
-  const workspace = await assertWorkspaceOwnership(userId, workspaceId)
+): Promise<WorkspaceSearchResult[]> {
   const trimmed = query.trim()
   if (trimmed.length === 0) return []
+  const scoped = await scopeWorkspaces(userId, options.workspaceId, dek)
+  if (scoped.length === 0) return []
 
   const db = useDb()
-  const candidateDocs = await db
-    .select({ id: documents.id, title: documents.title })
+  const keyCache: WorkspaceKeyCache = {}
+  const groups: SearchChunkGroup[] = []
+  const titleByDoc = new Map<number, string>()
+  const workspaceByDoc = new Map<number, { id: number, name: string }>()
+
+  for (const ws of scoped) {
+    // `ws` comes out of listUserWorkspaces already decrypted — only the
+    // per-doc titles still need the workspace's content key.
+    const key = await resolveContentKey(ws, userId, dek, keyCache)
+    const candidateDocs = await db
+      .select({ id: documents.id, title: documents.title })
+      .from(documents)
+      .where(and(eq(documents.workspaceId, ws.id), activeDocsWhere()))
+    if (candidateDocs.length === 0) continue
+    for (const d of candidateDocs) {
+      titleByDoc.set(d.id, decryptDocument({ title: d.title }, key).title ?? 'Untitled')
+      workspaceByDoc.set(d.id, { id: ws.id, name: ws.name })
+    }
+    groups.push({ docIds: candidateDocs.map(d => d.id), key })
+  }
+  if (groups.length === 0) return []
+
+  // `searchChunkGroups` returns snippets/highlights derived from the
+  // already-decrypted chunk text (see search.ts), so we don't need to
+  // decrypt the hit fields here.
+  const hits: SearchHit[] = await searchChunkGroups(groups, trimmed)
+
+  return hits.map((h) => {
+    const ws = workspaceByDoc.get(h.docId)
+    return {
+      docId: h.docId,
+      title: titleByDoc.get(h.docId) ?? 'Untitled',
+      chunkIdx: h.idx,
+      snippet: h.snippet,
+      highlight: h.highlight,
+      score: h.score,
+      workspaceId: ws?.id ?? 0,
+      workspaceName: ws?.name ?? '',
+    }
+  })
+}
+
+/* ========================================================================== */
+/*  Overview / find / append / tags / links (MCP round-trip reducers)          */
+/* ========================================================================== */
+
+export interface OverviewFolder {
+  id: number
+  name: string
+  parentId: number | null
+}
+
+export interface OverviewDocument {
+  id: number
+  title: string
+  folderId: number | null
+  updatedAt: Date
+  /** `summaryShort` from the doc's analysis, truncated — only when `includeSummaries`. */
+  summary?: string
+  /** Analysis tags — only when `includeSummaries`. */
+  tags?: string[]
+}
+
+export interface OverviewWorkspace {
+  id: number
+  name: string
+  emoji: string | null
+  role: WorkspaceRole
+  shared: boolean
+  folders: OverviewFolder[]
+  documents: OverviewDocument[]
+  /** Total active docs in the workspace — may exceed `documents.length` when truncated. */
+  documentCount: number
+  /** True when `documents` was capped at `maxDocsPerWorkspace` (most recently updated kept). */
+  truncated: boolean
+}
+
+export interface UserOverview {
+  workspaces: OverviewWorkspace[]
+  totals: { workspaces: number, documents: number }
+}
+
+export interface OverviewOptions {
+  /** Restrict to one workspace; omitted = all accessible workspaces. */
+  workspaceId?: number
+  /** Attach `summary` + `tags` from doc analyses (more tokens, more signal). */
+  includeSummaries?: boolean
+  /** Per-workspace document cap, most recently updated first. */
+  maxDocsPerWorkspace?: number
+}
+
+const OVERVIEW_MAX_DOCS_DEFAULT = 200
+const OVERVIEW_SUMMARY_MAX = 200
+
+/**
+ * One-shot map of the user's content: workspaces → folder tree → document
+ * titles (+ optional analysis summaries/tags). Built for MCP clients so
+ * "what do I have?" costs ONE tool round-trip instead of
+ * list_workspaces → get_workspace → list_documents × N.
+ */
+export async function getUserOverview(
+  userId: number,
+  options: OverviewOptions = {},
+  dek: Buffer | null = null,
+): Promise<UserOverview> {
+  const scoped = await scopeWorkspaces(userId, options.workspaceId, dek)
+  const maxDocs = options.maxDocsPerWorkspace ?? OVERVIEW_MAX_DOCS_DEFAULT
+
+  const db = useDb()
+  const keyCache: WorkspaceKeyCache = {}
+  const out: OverviewWorkspace[] = []
+  let totalDocs = 0
+
+  for (const ws of scoped) {
+    const key = await resolveContentKey(ws, userId, dek, keyCache)
+
+    const folderRows = await db
+      .select({ id: folders.id, name: folders.name, parentId: folders.parentId })
+      .from(folders)
+      .where(and(eq(folders.workspaceId, ws.id), activeFoldersWhere()))
+      .orderBy(asc(folders.position), asc(folders.id))
+
+    const docRows = await db
+      .select({
+        id: documents.id,
+        title: documents.title,
+        folderId: documents.folderId,
+        updatedAt: documents.updatedAt,
+      })
+      .from(documents)
+      .where(and(eq(documents.workspaceId, ws.id), activeDocsWhere()))
+      .orderBy(desc(documents.updatedAt), desc(documents.id))
+
+    const truncated = docRows.length > maxDocs
+    const kept = docRows.slice(0, maxDocs)
+    const docs: OverviewDocument[] = kept.map(d => ({
+      id: d.id,
+      title: decryptDocument({ title: d.title }, key).title ?? 'Untitled',
+      folderId: d.folderId,
+      updatedAt: d.updatedAt,
+    }))
+
+    if (options.includeSummaries && docs.length > 0) {
+      const analyses = await db
+        .select({ docId: docAnalyses.docId, summaryShort: docAnalyses.summaryShort, tags: docAnalyses.tags })
+        .from(docAnalyses)
+        .where(inArray(docAnalyses.docId, docs.map(d => d.id)))
+      const byDoc = new Map(analyses.map(a => [a.docId, a] as const))
+      for (const doc of docs) {
+        const a = byDoc.get(doc.id)
+        if (!a) continue
+        const plain = decryptAnalysis({ summaryShort: a.summaryShort, tags: a.tags ?? [] }, key)
+        const summary = (plain.summaryShort ?? '').trim()
+        if (summary.length > 0) doc.summary = clampString(summary, OVERVIEW_SUMMARY_MAX)
+        if ((plain.tags ?? []).length > 0) doc.tags = plain.tags
+      }
+    }
+
+    totalDocs += docRows.length
+    out.push({
+      id: ws.id,
+      name: ws.name,
+      emoji: ws.emoji,
+      role: ws.role,
+      shared: ws.shared,
+      folders: folderRows.map(f => ({
+        id: f.id,
+        name: decryptFolder({ name: f.name }, key).name ?? '',
+        parentId: f.parentId,
+      })),
+      documents: docs,
+      documentCount: docRows.length,
+      truncated,
+    })
+  }
+
+  return {
+    workspaces: out,
+    totals: { workspaces: out.length, documents: totalDocs },
+  }
+}
+
+export interface DocumentMatch {
+  docId: number
+  title: string
+  /** Title-match score in [0, 1] — see `scoreTitleMatch` tiers. */
+  score: number
+  workspaceId: number
+  workspaceName: string
+  folderId: number | null
+  updatedAt: Date
+}
+
+export interface FindDocumentsInput {
+  /** Title (or fragment) to look for — accent/case-insensitive. */
+  query: string
+  /** Exact workspace scope; wins over `workspaceName` when both are set. */
+  workspaceId?: number
+  /** Fuzzy workspace scope by name (e.g. user said "dans l'espace Travail"). */
+  workspaceName?: string
+  limit?: number
+}
+
+export interface FindDocumentsResult {
+  matches: DocumentMatch[]
+  /**
+   * Set when `workspaceName` matched no workspace — carries the available
+   * names so an MCP client can self-correct without an extra
+   * list_workspaces round-trip.
+   */
+  workspaceNameMiss?: { requested: string, available: string[] }
+}
+
+const FIND_DOCUMENTS_LIMIT_DEFAULT = 5
+/** A workspace name has to clear this to count as "the workspace the user meant". */
+const WORKSPACE_NAME_MIN_SCORE = 0.5
+
+/**
+ * Resolve "the note called X (in workspace Y)" in one call. Titles are
+ * encrypted at rest, so this is the canonical fetch + decrypt + JS-score
+ * scan (same pattern as `findOrCreateDailyNote`). Returns ranked matches;
+ * content retrieval stays with the caller (`read_document` /
+ * `getUserDocument`).
+ */
+export async function findUserDocuments(
+  userId: number,
+  input: FindDocumentsInput,
+  dek: Buffer | null = null,
+): Promise<FindDocumentsResult> {
+  const limit = input.limit ?? FIND_DOCUMENTS_LIMIT_DEFAULT
+
+  let scoped: WorkspaceListItem[]
+  if (input.workspaceId != null) {
+    scoped = await scopeWorkspaces(userId, input.workspaceId, dek)
+  }
+  else {
+    scoped = await scopeWorkspaces(userId, undefined, dek)
+    const requestedName = input.workspaceName?.trim()
+    if (requestedName) {
+      const ranked = scoped
+        .map(ws => ({ ws, score: scoreTitleMatch(requestedName, ws.name) }))
+        .filter(r => r.score >= WORKSPACE_NAME_MIN_SCORE)
+        .sort((a, b) => b.score - a.score)
+      if (ranked.length === 0) {
+        return {
+          matches: [],
+          workspaceNameMiss: { requested: requestedName, available: scoped.map(w => w.name) },
+        }
+      }
+      scoped = [ranked[0]!.ws]
+    }
+  }
+
+  const db = useDb()
+  const keyCache: WorkspaceKeyCache = {}
+  const matches: DocumentMatch[] = []
+
+  for (const ws of scoped) {
+    const key = await resolveContentKey(ws, userId, dek, keyCache)
+    const rows = await db
+      .select({
+        id: documents.id,
+        title: documents.title,
+        folderId: documents.folderId,
+        updatedAt: documents.updatedAt,
+      })
+      .from(documents)
+      .where(and(eq(documents.workspaceId, ws.id), activeDocsWhere()))
+
+    for (const r of rows) {
+      const title = decryptDocument({ title: r.title }, key).title ?? ''
+      const score = scoreTitleMatch(input.query, title)
+      if (score < TITLE_MATCH_MIN_SCORE) continue
+      matches.push({
+        docId: r.id,
+        title,
+        score,
+        workspaceId: ws.id,
+        workspaceName: ws.name,
+        folderId: r.folderId,
+        updatedAt: r.updatedAt,
+      })
+    }
+  }
+
+  matches.sort((a, b) => (b.score - a.score) || (+b.updatedAt - +a.updatedAt))
+  return { matches: matches.slice(0, limit) }
+}
+
+/**
+ * Append markdown to the end of a document without the caller having to
+ * read + merge + rewrite (3 round-trips → 1). Reuses `updateUserDocument`
+ * so version snapshots and doc-link reconciliation keep working.
+ */
+export async function appendToUserDocument(
+  userId: number,
+  docId: number,
+  markdown: string,
+  dek: Buffer | null = null,
+): Promise<Document> {
+  const { document: raw, role } = await assertDocumentMembership(userId, docId)
+  assertCanEdit(role)
+  if (raw.deletedAt != null) {
+    throw createError({ statusCode: 400, statusMessage: 'Document is in trash' })
+  }
+
+  const current = decryptDocument(raw, dek).markdown ?? ''
+  const addition = markdown.replace(/^\n+/, '')
+  const combined = current.trim().length === 0
+    ? addition
+    : `${current.replace(/\n+$/, '')}\n\n${addition}`
+
+  return updateUserDocument(userId, docId, { markdown: combined }, dek)
+}
+
+export interface TagAggregate {
+  name: string
+  count: number
+  docIds: number[]
+}
+
+/**
+ * Distinct analysis tags across a workspace's active documents, with
+ * per-tag doc ids and counts. Tags are stored encrypted per-element —
+ * aggregation happens post-decrypt in JS (SQL `json_each` can't match
+ * ciphertext). Shared by `GET /api/workspaces/:id/tags` and the MCP
+ * `list_tags` tool.
+ */
+export async function listUserWorkspaceTags(
+  userId: number,
+  workspaceId: number,
+  dek: Buffer | null = null,
+): Promise<TagAggregate[]> {
+  const workspace = await assertWorkspaceOwnership(userId, workspaceId)
+  const db = useDb()
+
+  const docs = await db
+    .select({ id: documents.id })
     .from(documents)
     .where(and(eq(documents.workspaceId, workspace.id), activeDocsWhere()))
-  if (candidateDocs.length === 0) return []
-  const titleByDoc = new Map(
-    candidateDocs.map(d => [d.id, decryptDocument({ title: d.title }, dek).title!] as const),
-  )
+  if (docs.length === 0) return []
 
-  // `searchWorkspaceChunks` returns snippets/highlights derived from the
-  // already-decrypted chunk text (see search.ts changes), so we don't
-  // need to decrypt the hit fields here.
-  const hits: SearchHit[] = await searchWorkspaceChunks(
-    candidateDocs.map(d => d.id),
-    trimmed,
-    dek,
-  )
+  const analyses = await db
+    .select({ docId: docAnalyses.docId, tags: docAnalyses.tags })
+    .from(docAnalyses)
+    .where(inArray(docAnalyses.docId, docs.map(d => d.id)))
 
-  return hits.map(h => ({
-    docId: h.docId,
-    title: titleByDoc.get(h.docId) ?? 'Untitled',
-    chunkIdx: h.idx,
-    snippet: h.snippet,
-    highlight: h.highlight,
-    score: h.score,
-  }))
+  // Aggregate by lower-case tag name to fold near-duplicates, but display
+  // the first capitalisation we saw so the UI stays readable.
+  const byKey = new Map<string, { display: string, count: number, docIds: Set<number> }>()
+  for (const row of analyses) {
+    const tags = decryptAnalysis({ tags: row.tags ?? [] }, dek).tags ?? []
+    if (!Array.isArray(tags) || tags.length === 0) continue
+    // Within one document, a tag should only count once even if duplicated
+    // in the analysis output.
+    const seenInDoc = new Set<string>()
+    for (const rawTag of tags) {
+      if (typeof rawTag !== 'string') continue
+      const trimmed = rawTag.trim()
+      if (trimmed.length === 0) continue
+      const tagKey = trimmed.toLowerCase()
+      if (seenInDoc.has(tagKey)) continue
+      seenInDoc.add(tagKey)
+
+      const existing = byKey.get(tagKey)
+      if (existing) {
+        existing.count += 1
+        existing.docIds.add(row.docId)
+      }
+      else {
+        byKey.set(tagKey, { display: trimmed, count: 1, docIds: new Set([row.docId]) })
+      }
+    }
+  }
+
+  return Array.from(byKey.values())
+    .map(v => ({ name: v.display, count: v.count, docIds: Array.from(v.docIds).sort((a, b) => a - b) }))
+    .sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count
+      return a.name.localeCompare(b.name)
+    })
+}
+
+export interface DocLinkRef {
+  docId: number
+  title: string
+}
+
+export interface DocumentLinks {
+  /** Active documents this document links TO (wiki-style links in its body). */
+  outgoing: DocLinkRef[]
+  /** Active documents that link TO this document. */
+  backlinks: DocLinkRef[]
+}
+
+/**
+ * Wiki-link neighbourhood of a document (both directions, trashed docs
+ * excluded). Cheap enough to ride along on every MCP `read_document`.
+ */
+export async function getUserDocumentLinks(
+  userId: number,
+  docId: number,
+  dek: Buffer | null = null,
+): Promise<DocumentLinks> {
+  await assertDocumentOwnership(userId, docId)
+  const db = useDb()
+
+  const [outgoingRows, incomingRows] = await Promise.all([
+    db
+      .select({ docId: documents.id, title: documents.title })
+      .from(docLinks)
+      .innerJoin(documents, eq(documents.id, docLinks.targetDocId))
+      .where(and(eq(docLinks.sourceDocId, docId), activeDocsWhere())),
+    db
+      .select({ docId: documents.id, title: documents.title })
+      .from(docLinks)
+      .innerJoin(documents, eq(documents.id, docLinks.sourceDocId))
+      .where(and(eq(docLinks.targetDocId, docId), activeDocsWhere())),
+  ])
+
+  const toRefs = (rows: { docId: number, title: string }[]): DocLinkRef[] => {
+    const seen = new Set<number>()
+    const refs: DocLinkRef[] = []
+    for (const r of rows) {
+      if (seen.has(r.docId)) continue
+      seen.add(r.docId)
+      refs.push({ docId: r.docId, title: decryptField(r.title, dek) })
+    }
+    refs.sort((a, b) => a.title.localeCompare(b.title))
+    return refs
+  }
+
+  return { outgoing: toRefs(outgoingRows), backlinks: toRefs(incomingRows) }
 }
 
 /* ========================================================================== */

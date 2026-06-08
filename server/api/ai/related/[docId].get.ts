@@ -5,7 +5,7 @@ import { docAnalyses, docChunks, docLinks, documents } from '~/server/database/s
 import { assertDocumentAccess, parseIdParam } from '~/server/utils/access'
 import { activeDocsWhere } from '~/server/utils/active'
 import { decryptField } from '~/server/utils/crypto'
-import { getDek } from '~/server/utils/dek'
+import { getWorkspaceKey } from '~/server/utils/workspace-key'
 import {
   decryptAnalysis,
   decryptChunkText,
@@ -60,7 +60,9 @@ function makeSnippet(text: string): string {
 export default defineEventHandler(async (event) => {
   const docId = parseIdParam(event, 'docId')
   const doc = await assertDocumentAccess(event, docId)
-  const dek = await getDek(event)
+  // Candidates are all in `doc.workspaceId`, so one workspace key (DEK for
+  // solo, WEK for shared) decrypts every title / summary / chunk below.
+  const dek = await getWorkspaceKey(event, doc.workspaceId)
 
   const db = useDb()
 

@@ -416,34 +416,53 @@ function applyPerDocCap(
 /* -------------------------------------------------------------------------- */
 
 /**
- * Embed the query, run hybrid retrieval, rerank, derive per-chunk highlight.
- * Used by `searchUserWorkspace` (MCP `search_notes`).
+ * A retrieval scope sharing one decryption key — in practice, one
+ * workspace's candidate doc ids plus its resolved content key (DEK for
+ * solo workspaces, WEK for shared ones).
+ */
+export interface SearchChunkGroup {
+  docIds: number[]
+  /** Resolved content key for these docs (null = plaintext/legacy). */
+  key: Buffer | null
+}
+
+/**
+ * Embed the query ONCE, run hybrid retrieval per group, merge, rerank the
+ * merged pool ONCE, derive per-chunk highlights. Used by
+ * `searchUserNotes` (MCP `search_notes`) — one group per workspace so
+ * cross-workspace search pays a single embed + a single rerank round-trip
+ * regardless of how many workspaces are in scope.
  *
  * Chat (`chat.post.ts`) does NOT call this — it embeds the query itself
  * because it interleaves with conversation rewriting + reranking, and its
  * post-stream highlight is computed against the model's answer rather than
  * the query.
  */
-export async function searchWorkspaceChunks(
-  candidateDocIds: number[],
+export async function searchChunkGroups(
+  groups: SearchChunkGroup[],
   query: string,
-  dek: Buffer | null = null,
 ): Promise<SearchHit[]> {
-  if (candidateDocIds.length === 0) return []
+  const nonEmpty = groups.filter(g => g.docIds.length > 0)
+  if (nonEmpty.length === 0) return []
   const trimmed = query.trim()
   if (trimmed.length === 0) return []
 
   const [queryVec] = await mistralEmbed([trimmed])
   if (!queryVec || queryVec.length === 0) return []
 
-  // Oversample first stage so the reranker has room to work.
+  // Oversample first stage so the reranker has room to work. The pool is
+  // global — each group contributes up to RERANK_POOL candidates and the
+  // reranker arbitrates across workspaces.
   const RERANK_POOL = Math.max(SEARCH_TOP_K * 3, 15)
-  const scored = await rankChunks(candidateDocIds, queryVec, {
-    queryText: trimmed,
-    topK: RERANK_POOL,
-    perDocCap: Number.POSITIVE_INFINITY,
-  }, dek)
-  const reranked = await rerankChunks(trimmed, scored, SEARCH_TOP_K * 2)
+  const perGroup = await Promise.all(nonEmpty.map(g =>
+    rankChunks(g.docIds, queryVec, {
+      queryText: trimmed,
+      topK: RERANK_POOL,
+      perDocCap: Number.POSITIVE_INFINITY,
+    }, g.key),
+  ))
+  const merged = perGroup.flat().sort((a, b) => b.score - a.score).slice(0, RERANK_POOL)
+  const reranked = await rerankChunks(trimmed, merged, SEARCH_TOP_K * 2)
   const capped = applyPerDocCap(reranked, SEARCH_PER_DOC_CAP, SEARCH_TOP_K)
 
   return capped.map((s): SearchHit => {
@@ -456,4 +475,16 @@ export async function searchWorkspaceChunks(
       score: s.score,
     }
   })
+}
+
+/**
+ * Single-scope convenience wrapper around `searchChunkGroups` — kept for
+ * call sites that operate on one workspace with one key.
+ */
+export async function searchWorkspaceChunks(
+  candidateDocIds: number[],
+  query: string,
+  dek: Buffer | null = null,
+): Promise<SearchHit[]> {
+  return searchChunkGroups([{ docIds: candidateDocIds, key: dek }], query)
 }

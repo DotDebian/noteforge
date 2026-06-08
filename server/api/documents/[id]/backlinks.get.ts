@@ -5,7 +5,7 @@ import { docLinks, documents } from '~/server/database/schema'
 import { assertDocumentAccess, parseIdParam } from '~/server/utils/access'
 import { activeDocsWhere } from '~/server/utils/active'
 import { decryptField } from '~/server/utils/crypto'
-import { getDek } from '~/server/utils/dek'
+import { getWorkspaceKey } from '~/server/utils/workspace-key'
 
 /**
  * Sprint 4 / F2 — incoming wiki-style links to this document.
@@ -16,8 +16,10 @@ import { getDek } from '~/server/utils/dek'
  */
 export default defineEventHandler(async (event) => {
   const id = parseIdParam(event)
-  await assertDocumentAccess(event, id)
-  const dek = await getDek(event)
+  const doc = await assertDocumentAccess(event, id)
+  // Backlinks are intra-workspace (see extractDocLinks), so every source
+  // doc's title is encrypted under this one workspace's key.
+  const dek = await getWorkspaceKey(event, doc.workspaceId)
 
   const db = useDb()
   const rows = await db

@@ -45,6 +45,14 @@ interface KeyContext {
   [WEK_CACHE_CTX_KEY]?: Map<number, Buffer>
 }
 
+/**
+ * Opaque per-request cache for key resolution. H3 callers pass
+ * `event.context`; sessionless callers (MCP) allocate a plain `{}` once
+ * per request and thread it through every resolution so the private-key
+ * unwrap and each workspace's WEK open are paid at most once.
+ */
+export type WorkspaceKeyCache = KeyContext
+
 async function loadWorkspace(workspaceId: number): Promise<Workspace> {
   const db = useDb()
   const [ws] = await db.select().from(workspaces).where(eq(workspaces.id, workspaceId)).limit(1)
@@ -107,6 +115,23 @@ interface ResolveArgs {
  */
 export async function getWorkspaceKeyForUser(args: ResolveArgs): Promise<Buffer> {
   return resolveKeyForUser(args)
+}
+
+/**
+ * Same as `getWorkspaceKeyForUser` but loads the workspace row itself.
+ * Convenience for callers that only hold a workspace id (MCP key
+ * resolvers). Returns `null` when the caller has no DEK (legacy /
+ * pre-encryption tokens) — pass-through convention, same as `getDek`.
+ */
+export async function getWorkspaceKeyForUserById(
+  userId: number,
+  workspaceId: number,
+  dek: Buffer | null,
+  cache?: WorkspaceKeyCache,
+): Promise<Buffer | null> {
+  if (!dek) return null
+  const workspace = await loadWorkspace(workspaceId)
+  return resolveKeyForUser({ workspace, userId, dek, cache })
 }
 
 async function resolveKeyForUser({ workspace, userId, dek, cache }: ResolveArgs): Promise<Buffer> {

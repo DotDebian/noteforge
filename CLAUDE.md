@@ -133,12 +133,21 @@ Token CRUD endpoints (session-authenticated, called by the front):
 **Per-request server**: each HTTP hit builds a fresh `McpServer` with tools that close over the resolved user. No cross-request state, no shared session map. The transport handles its own start/close lifecycle in the request's `finally` block.
 
 **Tools exposed** (see [server/api/mcp/index.ts](server/api/mcp/index.ts) for the wire schemas — all closure over the authenticated user, all scoped to that user's workspaces):
+- `get_overview(workspaceId?, includeSummaries?, maxDocsPerWorkspace?)` — one-shot content map (workspaces → folders → doc titles, optional analysis summaries/tags); the round-trip reducer MCP clients should prefer over chaining list calls
+- `find_document(query, workspaceId?, workspaceName?, limit?, includeContent?)` — fuzzy accent-insensitive title resolution ([server/utils/title-match.ts](server/utils/title-match.ts)); `includeContent` embeds the best match's full markdown + analysis; a `workspaceName` miss returns the available names so the client self-corrects without a list call
 - `list_workspaces` / `get_workspace(workspaceId)`
-- `list_documents(workspaceId, folderId?)` / `read_document(documentId)` — read tools pass `{ includeTrashed: false }` so trashed docs raise 404 over MCP, even though the REST `GET /api/documents/:id` returns them (trash UI needs them)
+- `list_documents(workspaceId, folderId?)` / `read_document(documentId)` — read tools pass `{ includeTrashed: false }` so trashed docs raise 404 over MCP, even though the REST `GET /api/documents/:id` returns them (trash UI needs them). `read_document` also returns the wiki-link neighbourhood (`links.outgoing` / `links.backlinks`)
 - `create_document` / `update_document` / `delete_document` (soft)
+- `append_to_document(documentId, markdown)` — append without read-merge-rewrite; reuses `updateUserDocument` so snapshots + doc-link reconcile still run
+- `get_daily_note(workspaceId, date?, appendMarkdown?)` — find-or-create the `YYYY-MM-DD` journal note (date defaults to server-today), optional same-call append
 - `create_folder` / `update_folder` / `delete_folder` (soft — cascades the whole subtree with a shared `deletedAt` timestamp)
-- `search_notes(workspaceId, query)` — hybrid (vec + FTS5 BM25 + RRF) + Mistral reranker, top-6 with max 2/doc (same shared primitives as chat RAG, but reranked end-to-end since MCP returns results directly)
+- `search_notes(workspaceId?, query)` — hybrid (vec + FTS5 BM25 + RRF) + Mistral reranker, top-6 with max 2/doc (same shared primitives as chat RAG, but reranked end-to-end since MCP returns results directly). `workspaceId` omitted = cross-workspace: one embed + one rerank total via `searchChunkGroups` (one group per workspace key)
+- `list_tags(workspaceId)` — analysis-tag aggregate (shared with `GET /api/workspaces/:id/tags` via `listUserWorkspaceTags`)
 - `analyze_document(documentId)` — runs the Mistral JSON analysis + fire-and-forget re-embed
+
+⚠️ **MCP responses are LLM context**: tool handlers strip `contentJson` (Tiptap mirror of markdown) and `summaryEmbedding` / embed bookkeeping (a serialized Float32 buffer is ~20 KB of JSON numbers) via `toMcpDocument` / `toMcpAnalysis`, and `jsonResult` serializes compact (no indent). Keep new tools on that diet.
+
+⚠️ **MCP + shared workspaces**: the bearer-unwrapped DEK only decrypts solo (`'dek'`) workspaces. Every tool touching content resolves the real key through `keyForWorkspace` / `keyForDocument` / `keyForFolder` (per-request cached, backed by `getWorkspaceKeyForUserById`). Multi-workspace sweeps in `notes.ts` (`getUserOverview`, `findUserDocuments`, `searchUserNotes`) resolve per-workspace keys internally and degrade a failed WEK unwrap to `null` instead of failing the sweep.
 
 **Shared service layer**: [server/utils/notes.ts](server/utils/notes.ts) is the single source of truth for these operations. REST endpoints in `server/api/{workspaces,documents,folders,ai/analyze}` delegate to it; MCP tools call it directly. Retrieval (chat + `search_notes`) shares [server/utils/search.ts](server/utils/search.ts) (`rankChunks`, `searchWorkspaceChunks`) so tuning a constant takes effect in both. Ownership checks use the **`assert*Ownership(userId, …)`** variants from [server/utils/access.ts](server/utils/access.ts) (the H3-event `assert*Access` wrappers still exist and resolve the user via `requireUser` before delegating).
 

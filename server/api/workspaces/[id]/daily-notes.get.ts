@@ -8,6 +8,7 @@
 import { z } from 'zod'
 import { requireUser } from '~/server/utils/require-user'
 import { listDailyNotesForMonth } from '~/server/utils/notes'
+import { getWorkspaceKey } from '~/server/utils/workspace-key'
 
 const Query = z.object({
   month: z.string().regex(/^\d{4}-\d{2}$/, 'month must be YYYY-MM'),
@@ -20,6 +21,9 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'invalid_workspace_id' })
   }
   const q = await getValidatedQuery(event, (v) => Query.parse(v))
-  const dates = await listDailyNotesForMonth(user.id, wsId, q.month)
+  // Key needed to decrypt titles — without it no encrypted title can match
+  // the YYYY-MM- prefix and the calendar would show an empty month.
+  const key = await getWorkspaceKey(event, wsId)
+  const dates = await listDailyNotesForMonth(user.id, wsId, q.month, key)
   return { dates }
 })

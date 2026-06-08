@@ -6,8 +6,8 @@ import { documents, favorites } from '~/server/database/schema'
 import { assertWorkspaceAccess } from '~/server/utils/access'
 import { activeDocsWhere } from '~/server/utils/active'
 import { decryptField } from '~/server/utils/crypto'
-import { getDek } from '~/server/utils/dek'
 import { requireUser } from '~/server/utils/require-user'
+import { getWorkspaceKey } from '~/server/utils/workspace-key'
 
 const Query = z.object({
   workspaceId: z.coerce.number().int().positive(),
@@ -23,7 +23,9 @@ export default defineEventHandler(async (event) => {
   const q = await getValidatedQuery(event, Query.parse)
   const user = await requireUser(event)
   await assertWorkspaceAccess(event, q.workspaceId)
-  const dek = await getDek(event)
+  // Titles are encrypted under the workspace's key (DEK for solo, WEK for
+  // shared) — `getDek` alone can't decrypt a shared workspace's titles.
+  const dek = await getWorkspaceKey(event, q.workspaceId)
 
   const db = useDb()
   const rows = await db

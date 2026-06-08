@@ -8,6 +8,7 @@
 import { z } from 'zod'
 import { requireUser } from '~/server/utils/require-user'
 import { findOrCreateDailyNote } from '~/server/utils/notes'
+import { getWorkspaceKey } from '~/server/utils/workspace-key'
 
 const Body = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD'),
@@ -20,6 +21,9 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'invalid_workspace_id' })
   }
   const body = await readValidatedBody(event, (v) => Body.parse(v))
-  const { document, created } = await findOrCreateDailyNote(user.id, wsId, body.date)
+  // Without the workspace key, encrypted titles never match `date` and every
+  // click would create a duplicate (plaintext!) daily note.
+  const key = await getWorkspaceKey(event, wsId)
+  const { document, created } = await findOrCreateDailyNote(user.id, wsId, body.date, key)
   return { document, created }
 })

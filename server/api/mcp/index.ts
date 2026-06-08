@@ -11,22 +11,32 @@ import {
 } from 'h3'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
-import type { User } from '~/server/database/schema'
+import { eq } from 'drizzle-orm'
+import { useDb } from '~/server/database/client'
+import { documents, folders, type DocAnalysis, type Document, type User } from '~/server/database/schema'
 import { requireMcpUser } from '~/server/utils/mcpAuth'
 import { logMcpCall } from '~/server/utils/mcpCalls'
+import { getWorkspaceKeyForUserById, type WorkspaceKeyCache } from '~/server/utils/workspace-key'
 import {
   analyzeUserDocument,
+  appendToUserDocument,
   createUserDocument,
   createUserFolder,
+  findOrCreateDailyNote,
+  findUserDocuments,
   getUserDocument,
+  getUserDocumentLinks,
+  getUserOverview,
   getUserWorkspace,
   listUserDocuments,
   listUserWorkspaces,
-  searchUserWorkspace,
+  listUserWorkspaceTags,
+  searchUserNotes,
   softDeleteUserDocument,
   softDeleteUserFolder,
   updateUserDocument,
   updateUserFolder,
+  type WorkspaceListItem,
 } from '~/server/utils/notes'
 
 /* -------------------------------------------------------------------------- */
@@ -47,16 +57,60 @@ import {
  *  Soft-delete reminder: every NEW read tool added here MUST hide trashed
  *  rows. `notes.ts` (the only call path) applies `activeDocsWhere()` /
  *  `activeFoldersWhere()` on list reads, and lookup-by-id tools call
- *  `getUserDocument(..., { includeTrashed: false })`. Do not bypass.        */
+ *  `getUserDocument(..., { includeTrashed: false })`. Do not bypass.
+ *
+ *  Encryption reminder: the bearer-unwrapped DEK is the right key ONLY for
+ *  solo (`encryptionMode = 'dek'`) workspaces. Shared (`'wek'`) workspaces
+ *  encrypt under a per-workspace WEK — every tool that touches content MUST
+ *  resolve the key through `keyForWorkspace` / `keyForDocument` /
+ *  `keyForFolder` below (or call a notes.ts sweep that resolves keys
+ *  internally, like `getUserOverview`). Passing the raw DEK breaks reads
+ *  and CORRUPTS writes in shared workspaces.                                 */
 /* -------------------------------------------------------------------------- */
 
-/** Wrap an object payload as an MCP tool result with a JSON text part. */
+/** Wrap an object payload as an MCP tool result with a JSON text part.
+ *  Compact (no indentation) — these payloads are read by LLMs, and pretty-
+ *  printing inflates token cost for zero benefit. */
 function jsonResult(payload: unknown) {
   return {
     content: [
-      { type: 'text' as const, text: JSON.stringify(payload, null, 2) },
+      { type: 'text' as const, text: JSON.stringify(payload) },
     ],
   }
+}
+
+/* ---------- Response shaping ----------------------------------------------- */
+/*  MCP responses go straight into an LLM context window. Strip fields that    */
+/*  are heavy and useless to external clients:                                 */
+/*   - `contentJson`: Tiptap mirror of `markdown` (same content, ~2× tokens)   */
+/*   - `summaryEmbedding`: 1024-dim Float32 Buffer → ~20 KB of JSON numbers    */
+/*   - embed bookkeeping (`embedError`, `embedFailedAt`, length-at-analysis)   */
+
+function toMcpDocument(doc: Document): Omit<Document, 'contentJson'> {
+  const { contentJson: _contentJson, ...rest } = doc
+  return rest
+}
+
+function toMcpAnalysis(analysis: DocAnalysis | null) {
+  if (!analysis) return null
+  const {
+    summaryEmbedding: _summaryEmbedding,
+    embedError: _embedError,
+    embedFailedAt: _embedFailedAt,
+    markdownLengthAtAnalysis: _markdownLengthAtAnalysis,
+    ...rest
+  } = analysis
+  return rest
+}
+
+function toMcpWorkspace(ws: WorkspaceListItem) {
+  return { id: ws.id, name: ws.name, emoji: ws.emoji, role: ws.role, shared: ws.shared, createdAt: ws.createdAt }
+}
+
+/** Server-local `YYYY-MM-DD` — default date for `get_daily_note`. */
+function localDateString(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer {
@@ -64,6 +118,48 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
     name: 'noteforge',
     version: '0.1.0',
   })
+
+  /* ---------- Per-request workspace-key resolution ----------------------- */
+  // DEK for solo workspaces, WEK for shared ones. The caches live for one
+  // HTTP request (stateless transport = usually one tool call) but still
+  // dedupe the unwrap when a tool chains operations (e.g. get_daily_note
+  // find-or-create + append).
+  const keyCache: WorkspaceKeyCache = {}
+  const keyByWorkspace = new Map<number, Buffer | null>()
+
+  async function keyForWorkspace(workspaceId: number): Promise<Buffer | null> {
+    if (!dek) return null
+    const hit = keyByWorkspace.get(workspaceId)
+    if (hit !== undefined) return hit
+    const key = await getWorkspaceKeyForUserById(user.id, workspaceId, dek, keyCache)
+    keyByWorkspace.set(workspaceId, key)
+    return key
+  }
+
+  /** Key for the workspace containing this document. Unknown ids resolve to
+   *  `null` — the notes layer raises its canonical 404 right after. */
+  async function keyForDocument(documentId: number): Promise<Buffer | null> {
+    if (!dek) return null
+    const [row] = await useDb()
+      .select({ workspaceId: documents.workspaceId })
+      .from(documents)
+      .where(eq(documents.id, documentId))
+      .limit(1)
+    if (!row) return null
+    return keyForWorkspace(row.workspaceId)
+  }
+
+  /** Key for the workspace containing this folder. Same convention. */
+  async function keyForFolder(folderId: number): Promise<Buffer | null> {
+    if (!dek) return null
+    const [row] = await useDb()
+      .select({ workspaceId: folders.workspaceId })
+      .from(folders)
+      .where(eq(folders.id, folderId))
+      .limit(1)
+    if (!row) return null
+    return keyForWorkspace(row.workspaceId)
+  }
 
   /**
    * Wrap a tool handler with timing + success/failure logging into
@@ -90,15 +186,73 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
     }
   }
 
+  /* ---------- Overview & lookup (one-call round-trip reducers) ----------- */
+
+  server.registerTool(
+    'get_overview',
+    {
+      title: 'Content overview',
+      description:
+        'One-shot map of the user\'s content: every workspace (or one, with `workspaceId`) with its folder '
+        + 'tree and document list (id, title, folderId, updatedAt). Pass `includeSummaries: true` to attach '
+        + 'each document\'s AI summary + tags (more tokens, more signal). PREFER THIS over chaining '
+        + 'list_workspaces → get_workspace → list_documents when exploring or when the user references '
+        + 'content by name. Documents are capped per workspace (most recently updated first; `truncated` '
+        + 'flags a cut, `documentCount` keeps the real total).',
+      inputSchema: {
+        workspaceId: z.number().int().positive().optional(),
+        includeSummaries: z.boolean().optional(),
+        maxDocsPerWorkspace: z.number().int().min(1).max(500).optional(),
+      },
+    },
+    instrument('get_overview', async ({ workspaceId, includeSummaries, maxDocsPerWorkspace }: { workspaceId?: number, includeSummaries?: boolean, maxDocsPerWorkspace?: number }) => jsonResult(
+      await getUserOverview(user.id, { workspaceId, includeSummaries, maxDocsPerWorkspace }, dek),
+    )),
+  )
+
+  server.registerTool(
+    'find_document',
+    {
+      title: 'Find document by title',
+      description:
+        'Resolve "the note called X (in workspace Y)" in ONE call — fuzzy, accent/case-insensitive title '
+        + 'match across all workspaces, optionally narrowed by `workspaceId` or fuzzy `workspaceName`. '
+        + 'Returns ranked matches (docId, title, workspace, score). With `includeContent: true` the best '
+        + 'match\'s full markdown + analysis ride along, so a typical "read note X" needs no follow-up '
+        + 'read_document call. If `workspaceName` matches nothing, the response lists the available '
+        + 'workspace names so you can retry without calling list_workspaces. For content/meaning-based '
+        + 'search use search_notes instead.',
+      inputSchema: {
+        query: z.string().trim().min(1).max(300),
+        workspaceId: z.number().int().positive().optional(),
+        workspaceName: z.string().trim().min(1).max(200).optional(),
+        limit: z.number().int().min(1).max(20).optional(),
+        includeContent: z.boolean().optional(),
+      },
+    },
+    instrument('find_document', async ({ query, workspaceId, workspaceName, limit, includeContent }: { query: string, workspaceId?: number, workspaceName?: string, limit?: number, includeContent?: boolean }) => {
+      const result = await findUserDocuments(user.id, { query, workspaceId, workspaceName, limit }, dek)
+      const best = result.matches[0]
+      if (!includeContent || !best) return jsonResult(result)
+      const key = await keyForWorkspace(best.workspaceId)
+      const { document, analysis } = await getUserDocument(user.id, best.docId, { includeTrashed: false }, key)
+      return jsonResult({ ...result, document: toMcpDocument(document), analysis: toMcpAnalysis(analysis) })
+    }),
+  )
+
   /* ---------- Workspaces ------------------------------------------------- */
 
   server.registerTool(
     'list_workspaces',
     {
       title: 'List workspaces',
-      description: 'Return every workspace owned by the authenticated user (newest first).',
+      description:
+        'Return every workspace the user can access (owned + shared, newest first) with their role. '
+        + 'For a full content map (folders + documents included) prefer get_overview.',
     },
-    instrument('list_workspaces', async () => jsonResult({ workspaces: await listUserWorkspaces(user.id, dek) })),
+    instrument('list_workspaces', async () => jsonResult({
+      workspaces: (await listUserWorkspaces(user.id, dek)).map(toMcpWorkspace),
+    })),
   )
 
   server.registerTool(
@@ -110,7 +264,9 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
         workspaceId: z.number().int().positive(),
       },
     },
-    instrument('get_workspace', async ({ workspaceId }: { workspaceId: number }) => jsonResult(await getUserWorkspace(user.id, workspaceId, dek))),
+    instrument('get_workspace', async ({ workspaceId }: { workspaceId: number }) => jsonResult(
+      await getUserWorkspace(user.id, workspaceId, await keyForWorkspace(workspaceId)),
+    )),
   )
 
   /* ---------- Documents -------------------------------------------------- */
@@ -131,7 +287,7 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
       },
     },
     instrument('list_documents', async ({ workspaceId, folderId }: { workspaceId: number, folderId?: 'root' | number }) => jsonResult({
-      documents: await listUserDocuments(user.id, workspaceId, { folderId }, dek),
+      documents: await listUserDocuments(user.id, workspaceId, { folderId }, await keyForWorkspace(workspaceId)),
     })),
   )
 
@@ -140,15 +296,21 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
     {
       title: 'Read document',
       description:
-        'Read a single document (markdown + contentJson + analysis if present). Trashed documents are '
-        + 'NOT returned — they raise a 404 to keep the MCP surface consistent with list endpoints.',
+        'Read a single document by id: markdown, AI analysis (if present) and wiki-link neighbourhood '
+        + '(`links.outgoing` / `links.backlinks`). Trashed documents raise a 404. If you only know the '
+        + 'title, use find_document (with includeContent) instead of listing first.',
       inputSchema: {
         documentId: z.number().int().positive(),
       },
     },
-    instrument('read_document', async ({ documentId }: { documentId: number }) => jsonResult(
-      await getUserDocument(user.id, documentId, { includeTrashed: false }, dek),
-    )),
+    instrument('read_document', async ({ documentId }: { documentId: number }) => {
+      const key = await keyForDocument(documentId)
+      const [{ document, analysis }, links] = await Promise.all([
+        getUserDocument(user.id, documentId, { includeTrashed: false }, key),
+        getUserDocumentLinks(user.id, documentId, key),
+      ])
+      return jsonResult({ document: toMcpDocument(document), analysis: toMcpAnalysis(analysis), links })
+    }),
   )
 
   server.registerTool(
@@ -164,12 +326,12 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
       },
     },
     instrument('create_document', async ({ workspaceId, folderId, title, markdown }: { workspaceId: number, folderId?: number | null, title?: string, markdown?: string }) => jsonResult({
-      document: await createUserDocument(user.id, {
+      document: toMcpDocument(await createUserDocument(user.id, {
         workspaceId,
         folderId: folderId ?? null,
         title,
         markdown,
-      }, dek),
+      }, await keyForWorkspace(workspaceId))),
     })),
   )
 
@@ -178,8 +340,9 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
     {
       title: 'Update document',
       description:
-        'Patch a document. Provide any subset of `title` / `markdown` / `folderId`. Cannot move (folderId) '
-        + 'and reorder (position) in the same call. Trashed documents cannot be updated — restore first.',
+        'Patch a document. Provide any subset of `title` / `markdown` / `folderId`. `markdown` REPLACES the '
+        + 'whole body — to add to the end, prefer append_to_document (no prior read needed). Trashed '
+        + 'documents cannot be updated — restore first.',
       inputSchema: {
         documentId: z.number().int().positive(),
         title: z.string().trim().min(1).max(200).optional(),
@@ -188,11 +351,29 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
       },
     },
     instrument('update_document', async ({ documentId, title, markdown, folderId }: { documentId: number, title?: string, markdown?: string, folderId?: number | null }) => jsonResult({
-      document: await updateUserDocument(user.id, documentId, {
+      document: toMcpDocument(await updateUserDocument(user.id, documentId, {
         title,
         markdown,
         folderId,
-      }, dek),
+      }, await keyForDocument(documentId))),
+    })),
+  )
+
+  server.registerTool(
+    'append_to_document',
+    {
+      title: 'Append to document',
+      description:
+        'Append a markdown block to the END of a document in one call — no need to read the document '
+        + 'first. A blank line is inserted between the existing content and the addition. Version '
+        + 'snapshots and wiki-link reconciliation behave exactly like update_document.',
+      inputSchema: {
+        documentId: z.number().int().positive(),
+        markdown: z.string().min(1).max(2_000_000),
+      },
+    },
+    instrument('append_to_document', async ({ documentId, markdown }: { documentId: number, markdown: string }) => jsonResult({
+      document: toMcpDocument(await appendToUserDocument(user.id, documentId, markdown, await keyForDocument(documentId))),
     })),
   )
 
@@ -210,6 +391,32 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
     instrument('delete_document', async ({ documentId }: { documentId: number }) => jsonResult(
       await softDeleteUserDocument(user.id, documentId),
     )),
+  )
+
+  /* ---------- Daily notes (journal) -------------------------------------- */
+
+  server.registerTool(
+    'get_daily_note',
+    {
+      title: 'Get daily note (find-or-create)',
+      description:
+        'Find or create the journal note for a date (title `YYYY-MM-DD`, at the workspace root). `date` '
+        + 'defaults to today (server time). Pass `appendMarkdown` to add content to it in the SAME call — '
+        + 'the one-shot way to handle "add X to my daily note / journal".',
+      inputSchema: {
+        workspaceId: z.number().int().positive(),
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD').optional(),
+        appendMarkdown: z.string().min(1).max(2_000_000).optional(),
+      },
+    },
+    instrument('get_daily_note', async ({ workspaceId, date, appendMarkdown }: { workspaceId: number, date?: string, appendMarkdown?: string }) => {
+      const key = await keyForWorkspace(workspaceId)
+      const { document, created } = await findOrCreateDailyNote(user.id, workspaceId, date ?? localDateString(), key)
+      const finalDoc = appendMarkdown
+        ? await appendToUserDocument(user.id, document.id, appendMarkdown, key)
+        : document
+      return jsonResult({ document: toMcpDocument(finalDoc), created })
+    }),
   )
 
   /* ---------- Folders ---------------------------------------------------- */
@@ -230,7 +437,7 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
         workspaceId,
         parentId: parentId ?? null,
         name,
-      }, dek),
+      }, await keyForWorkspace(workspaceId)),
     })),
   )
 
@@ -248,7 +455,7 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
       },
     },
     instrument('update_folder', async ({ folderId, name, parentId }: { folderId: number, name?: string, parentId?: number | null }) => jsonResult({
-      folder: await updateUserFolder(user.id, folderId, { name, parentId }, dek),
+      folder: await updateUserFolder(user.id, folderId, { name, parentId }, await keyForFolder(folderId)),
     })),
   )
 
@@ -275,17 +482,36 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
     {
       title: 'Semantic search',
       description:
-        'Workspace-scoped semantic search across the user\'s notes. Embeds the query via Mistral, scores '
-        + 'document chunks by cosine similarity (MIN_SCORE=0.45), and returns up to 6 hits with a per-doc cap '
-        + 'of 2. Trashed documents are excluded. Each hit includes `docId`, `title`, `chunkIdx`, full chunk '
-        + '`snippet`, the best-matching `highlight` sentence relative to the query, and the cosine `score`.',
+        'Semantic + keyword search across the user\'s notes. Hybrid retrieval: Mistral embedding cosine '
+        + '+ FTS5 BM25, fused (RRF) and LLM-reranked; returns up to 6 hits (max 2 per document) with '
+        + '`docId`, `title`, `workspaceId`, `workspaceName`, the chunk `snippet`, the best-matching '
+        + '`highlight` sentence and a relevance `score`. Omit `workspaceId` to search ALL workspaces in '
+        + 'one call ("where did I write about X?"). Trashed documents are excluded. To find a note by '
+        + 'TITLE, use find_document instead — it\'s cheaper and exact.',
       inputSchema: {
-        workspaceId: z.number().int().positive(),
+        workspaceId: z.number().int().positive().optional(),
         query: z.string().trim().min(1).max(8000),
       },
     },
-    instrument('search_notes', async ({ workspaceId, query }: { workspaceId: number, query: string }) => jsonResult({
-      hits: await searchUserWorkspace(user.id, workspaceId, query, dek),
+    instrument('search_notes', async ({ workspaceId, query }: { workspaceId?: number, query: string }) => jsonResult({
+      hits: await searchUserNotes(user.id, query, { workspaceId }, dek),
+    })),
+  )
+
+  server.registerTool(
+    'list_tags',
+    {
+      title: 'List workspace tags',
+      description:
+        'Aggregate the AI-analysis tags across a workspace\'s active documents: each tag with its document '
+        + 'count and doc ids, sorted by frequency. Useful to grasp the themes of a workspace or to locate '
+        + 'documents by topic without a semantic search.',
+      inputSchema: {
+        workspaceId: z.number().int().positive(),
+      },
+    },
+    instrument('list_tags', async ({ workspaceId }: { workspaceId: number }) => jsonResult({
+      tags: await listUserWorkspaceTags(user.id, workspaceId, await keyForWorkspace(workspaceId)),
     })),
   )
 
@@ -302,7 +528,7 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
       },
     },
     instrument('analyze_document', async ({ documentId }: { documentId: number }) => jsonResult({
-      analysis: await analyzeUserDocument(user.id, documentId, dek),
+      analysis: toMcpAnalysis(await analyzeUserDocument(user.id, documentId, await keyForDocument(documentId))),
     })),
   )
 
