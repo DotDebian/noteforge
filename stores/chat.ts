@@ -43,18 +43,32 @@ export interface UIChatMessage {
   createdAt?: number
   /** Suggested next questions (Wave 2 / N4); chips rendered under the latest assistant reply. */
   followups?: string[]
-  /** True when the server auto-triggered web search for this turn (user asked in natural language, toggle was off). */
+  /** True when the model ran a web search this turn on its own (toggle was off). Derived from `meta`. */
   webAutoTriggered?: boolean
-  /** Number of web hits found by the auto-triggered search; 0 = nothing matched. */
+  /** Number of web hits found by the search; 0 = nothing matched. */
   webAutoHits?: number
+  /**
+   * Live activity phase for a still-pending assistant turn (Wave 5). Drives the
+   * "Réflexion… / Recherche web… / Rédaction…" indicator. Ephemeral — undefined
+   * once the turn finishes.
+   */
+  status?: 'thinking' | 'web' | 'writing'
+  /**
+   * Visible web-search step (Wave 5). Surfaced while/after the model calls the
+   * `web_search` tool so the user can see what was searched. Ephemeral (live
+   * turns only); historic turns reconstruct a static badge from `meta`.
+   */
+  webStep?: { query: string, status: 'running' | 'done', hits: number }
   /** Per-turn debug meta (model used, web state, retrieval query, …). Populated from the SSE `meta` frame. */
   meta?: {
     model: string | null
     webRequested: boolean
     webAuto: boolean
+    /** True when a web search actually ran this turn (model called the tool or the toggle forced it). */
+    webUsed?: boolean
     webHits: number
-    /** Diagnostic payload from the web-search side-call (endpoint, status, raw sample, error, parser version). Null when web wasn't attempted. */
-    webDebug: { endpoint: string, model: string, status: number | null, error?: string | null, rawSample?: string | null, parserVersion?: string | null } | null
+    /** Diagnostic payload from the web-search side-call (endpoint, provider, status, raw sample, error). Null when web wasn't attempted. */
+    webDebug: { endpoint?: string, provider?: string, model?: string, status: number | null, error?: string | null, rawSample?: string | null, parserVersion?: string | null } | null
     noteHits: number
     retrievalQuery: string
     rewriterUsed: boolean
@@ -157,9 +171,22 @@ interface State {
   pendingAttachmentId: number | null
 }
 
+/**
+ * A chat message as returned by the load/branch endpoints: the encrypted
+ * columns (`content`, `sources`, `followups`, `meta`) are decrypted server-side
+ * into their plaintext shapes, so the wire type diverges from the raw
+ * `ChatMessage` row type.
+ */
+type LoadedChatMessage = Omit<ChatMessage, 'content' | 'sources' | 'followups' | 'meta'> & {
+  content: string
+  sources: ChatSource[]
+  followups?: string[]
+  meta?: UIChatMessage['meta'] | null
+}
+
 interface SessionDetailResponse {
   session: ChatSession
-  messages: ChatMessage[]
+  messages: LoadedChatMessage[]
 }
 
 interface SessionsListResponse {
@@ -169,7 +196,7 @@ interface SessionsListResponse {
 
 interface BranchResponse {
   session: ChatSession
-  messages: ChatMessage[]
+  messages: LoadedChatMessage[]
 }
 
 interface ToolCallApproveResponse {
@@ -184,13 +211,19 @@ interface ToolCallApproveResponse {
   }
 }
 
-function adaptMessage(m: ChatMessage): UIChatMessage {
+function adaptMessage(m: LoadedChatMessage): UIChatMessage {
   // Drizzle wraps `created_at` (integer / mode: 'timestamp') in a JS Date on
   // read. Coerce to unix-seconds so the UI doesn't have to deal with two
   // shapes (the SSE `done` frame emits unix-seconds; persisted rows match).
   const createdAt = m.createdAt instanceof Date
     ? Math.floor(m.createdAt.getTime() / 1000)
     : (typeof m.createdAt === 'number' ? m.createdAt : undefined)
+  // History parity: restore the persisted follow-up chips + meta so a reopened
+  // session renders the same chips / web badge / debug panel as the live turn.
+  const followups = Array.isArray(m.followups)
+    ? m.followups.filter((q): q is string => typeof q === 'string' && q.trim().length > 0).slice(0, 3)
+    : []
+  const meta = m.meta && typeof m.meta === 'object' ? m.meta : undefined
   return {
     id: m.id,
     role: m.role,
@@ -198,6 +231,14 @@ function adaptMessage(m: ChatMessage): UIChatMessage {
     sources: (m.sources ?? []) as ChatSource[],
     userFeedback: m.userFeedback ?? null,
     createdAt,
+    ...(followups.length > 0 ? { followups } : {}),
+    ...(meta
+      ? {
+          meta,
+          webAutoTriggered: meta.webUsed === true,
+          webAutoHits: typeof meta.webHits === 'number' ? meta.webHits : 0,
+        }
+      : {}),
   }
 }
 
@@ -853,6 +894,7 @@ export const useChatStore = defineStore('chat', {
         content: '',
         sources: [],
         pending: true,
+        status: 'thinking',
       })
 
       const findAssistant = (): UIChatMessage | undefined =>
@@ -975,12 +1017,17 @@ export const useChatStore = defineStore('chat', {
               // streams. Cleared / overridden by the final `done` frame.
               a.partialSources = event.sources as ChatSource[]
             }
-            else if (event.type === 'web_auto') {
-              // Server detected a "search the web" intent in the user
-              // message and ran web search even though the toggle was off.
-              // We flag the assistant message so the UI shows a small badge.
-              a.webAutoTriggered = true
-              if (typeof event.hits === 'number') a.webAutoHits = event.hits
+            else if (event.type === 'tool_step' && event.tool === 'web_search') {
+              // Wave 5 — the model called the `web_search` tool. Surface a
+              // visible step ("Recherche web : <query>") and flip the live
+              // activity phase so the indicator reads "Recherche web…".
+              const status = event.status === 'done' ? 'done' : 'running'
+              a.webStep = {
+                query: typeof event.query === 'string' ? event.query : '',
+                status,
+                hits: typeof event.hits === 'number' ? event.hits : 0,
+              }
+              a.status = status === 'done' ? 'writing' : 'web'
             }
             else if (event.type === 'meta') {
               // Per-turn debug meta. Snapshot whatever the server sent —
@@ -989,17 +1036,17 @@ export const useChatStore = defineStore('chat', {
               const webDebug = wd && typeof wd === 'object'
                 ? {
                     endpoint: typeof (wd as { endpoint?: unknown }).endpoint === 'string' ? (wd as { endpoint: string }).endpoint : '',
-                    model: typeof (wd as { model?: unknown }).model === 'string' ? (wd as { model: string }).model : '',
+                    provider: typeof (wd as { provider?: unknown }).provider === 'string' ? (wd as { provider: string }).provider : undefined,
                     status: typeof (wd as { status?: unknown }).status === 'number' ? (wd as { status: number }).status : null,
                     error: typeof (wd as { error?: unknown }).error === 'string' ? (wd as { error: string }).error : null,
                     rawSample: typeof (wd as { rawSample?: unknown }).rawSample === 'string' ? (wd as { rawSample: string }).rawSample : null,
-                    parserVersion: typeof (wd as { parserVersion?: unknown }).parserVersion === 'string' ? (wd as { parserVersion: string }).parserVersion : null,
                   }
                 : null
               a.meta = {
                 model: typeof event.model === 'string' ? event.model : null,
                 webRequested: event.webRequested === true,
                 webAuto: event.webAuto === true,
+                webUsed: event.webUsed === true,
                 webHits: typeof event.webHits === 'number' ? event.webHits : 0,
                 webDebug,
                 noteHits: typeof event.noteHits === 'number' ? event.noteHits : 0,
@@ -1014,6 +1061,12 @@ export const useChatStore = defineStore('chat', {
                 scopeFolderId: typeof event.scopeFolderId === 'number' ? event.scopeFolderId : null,
                 temperature: typeof event.temperature === 'number' ? event.temperature : null,
               }
+              // Mirror the web-usage flags onto the message so the "web search
+              // ran" badge shows immediately (meta now arrives at end-of-turn).
+              if (event.webUsed === true) {
+                a.webAutoTriggered = true
+                a.webAutoHits = typeof event.webHits === 'number' ? event.webHits : 0
+              }
             }
             else if (event.type === 'tool_call_pending' && Array.isArray(event.calls)) {
               // Wave 4 / N8 — assistant proposes a write. The UI renders an
@@ -1027,6 +1080,8 @@ export const useChatStore = defineStore('chat', {
               if (calls.length > 0) a.pendingToolCalls = calls
             }
             else if (event.type === 'delta' && typeof event.text === 'string') {
+              // First token of the answer → flip the indicator to "Rédaction…".
+              if (event.text.length > 0 && a.status !== 'writing') a.status = 'writing'
               a.content += event.text
             }
             else if (event.type === 'followups' && Array.isArray(event.items)) {
@@ -1036,6 +1091,7 @@ export const useChatStore = defineStore('chat', {
             }
             else if (event.type === 'done') {
               a.pending = false
+              a.status = undefined
               if (Array.isArray(event.sources)) a.sources = event.sources as ChatSource[]
               // Drop the partial-sources hint once the cited list is in.
               a.partialSources = undefined
@@ -1052,6 +1108,7 @@ export const useChatStore = defineStore('chat', {
             }
             else if (event.type === 'error') {
               a.pending = false
+              a.status = undefined
               a.errored = true
               const detail = typeof event.detail === 'string' ? event.detail : 'Mistral error'
               a.content = a.content

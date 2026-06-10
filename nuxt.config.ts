@@ -19,6 +19,7 @@ export default defineNuxtConfig({
     mistralApiKey: process.env.MISTRAL_API_KEY ?? '',
     mistralChatModel: process.env.MISTRAL_CHAT_MODEL ?? 'mistral-medium-latest',
     mistralEmbedModel: process.env.MISTRAL_EMBED_MODEL ?? 'mistral-embed',
+    tavilyApiKey: process.env.TAVILY_API_KEY ?? '',
     databaseUrl: process.env.DATABASE_URL ?? 'data/noteforge.db',
     inviteCode: process.env.INVITE_CODE ?? 'NLJELA',
     session: {

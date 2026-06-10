@@ -132,11 +132,29 @@ export type MistralStreamEvent =
       snippet?: string
     }>
   }
+  | {
+    /** Assembled function tool call(s) the model chose to make this turn. */
+    kind: 'tool_call'
+    calls: Array<{ id: string, name: string, arguments: string }>
+  }
+
+/**
+ * A streaming tool-call fragment. Mistral (OpenAI-style) streams function calls
+ * across deltas: the first carries `id` + `function.name`, subsequent ones
+ * append `function.arguments` fragments, keyed by `index`.
+ */
+interface MistralToolCallDelta {
+  index?: number
+  id?: string
+  function?: { name?: string, arguments?: string }
+}
 
 interface MistralStreamDelta {
   role?: MistralRole
   /** Either a plain string (legacy) or an array of typed content chunks. */
   content?: string | MistralContentChunk[]
+  /** Present when the model is making a function tool call. */
+  tool_calls?: MistralToolCallDelta[]
 }
 
 interface MistralStreamChoice {
@@ -399,6 +417,18 @@ export async function* mistralChatStream(
   const decoder = new TextDecoder()
   let buf = ''
   let capturedUsage: MistralStreamChunk['usage'] | undefined
+  // Tool-call fragments accumulate across deltas, keyed by `index`. We flush
+  // them as a single `tool_call` event when the model finishes calling tools
+  // (finish_reason === 'tool_calls') or at [DONE], whichever comes first.
+  const toolCallAcc = new Map<number, { id: string, name: string, args: string }>()
+  let toolCallsFlushed = false
+  const buildToolCalls = (): Array<{ id: string, name: string, arguments: string }> => {
+    toolCallsFlushed = true
+    return [...toolCallAcc.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, c]) => ({ id: c.id, name: c.name, arguments: c.args }))
+      .filter(c => c.name.length > 0)
+  }
 
   try {
     while (true) {
@@ -424,6 +454,10 @@ export async function* mistralChatStream(
 
         const payload = dataLines.join('\n')
         if (payload === '[DONE]') {
+          if (!toolCallsFlushed && toolCallAcc.size > 0) {
+            const calls = buildToolCalls()
+            if (calls.length > 0) yield { kind: 'tool_call', calls }
+          }
           markSuccess()
           const latencyMs = Date.now() - start
           if (capturedUsage) {
@@ -440,6 +474,30 @@ export async function* mistralChatStream(
         try {
           const parsed = JSON.parse(payload) as MistralStreamChunk
           if (parsed.usage) capturedUsage = parsed.usage
+
+          // Accumulate streamed tool-call fragments (function name + argument
+          // chunks) keyed by index.
+          const toolCalls = parsed.choices[0]?.delta?.tool_calls
+          if (Array.isArray(toolCalls)) {
+            for (const tc of toolCalls) {
+              const idx = typeof tc.index === 'number' ? tc.index : 0
+              const slot = toolCallAcc.get(idx) ?? { id: '', name: '', args: '' }
+              if (typeof tc.id === 'string' && tc.id.length > 0) slot.id = tc.id
+              if (typeof tc.function?.name === 'string' && tc.function.name.length > 0) {
+                slot.name = tc.function.name
+              }
+              if (typeof tc.function?.arguments === 'string') slot.args += tc.function.arguments
+              toolCallAcc.set(idx, slot)
+            }
+          }
+
+          // Flush as soon as the model signals it's done calling tools, so the
+          // caller can act without waiting for [DONE].
+          if (parsed.choices[0]?.finish_reason === 'tool_calls' && !toolCallsFlushed && toolCallAcc.size > 0) {
+            const calls = buildToolCalls()
+            if (calls.length > 0) yield { kind: 'tool_call', calls }
+          }
+
           const delta = parsed.choices[0]?.delta?.content
           if (typeof delta === 'string') {
             if (delta.length > 0) yield { kind: 'text', text: delta }

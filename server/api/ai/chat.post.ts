@@ -23,7 +23,9 @@ import { getWorkspaceKey } from '~/server/utils/workspace-key'
 import {
   decryptChatMessageContent,
   decryptDocument,
+  encryptChatFollowups,
   encryptChatMessageContent,
+  encryptChatMeta,
   encryptChatSessionTitle,
   encryptChatSources,
 } from '~/server/utils/encrypted-entities'
@@ -49,6 +51,7 @@ import { rerankChunks, getRerankerCircuitOpen } from '~/server/utils/rerank'
 import { rewriteQuery } from '~/server/utils/query-rewrite'
 import { FAST_MODEL } from '~/server/utils/query-rewrite'
 import { logRagQuality } from '~/server/utils/ragQuality'
+import { tavilySearch, tavilyExtract, type WebSearchDebug } from '~/server/utils/web-search'
 
 /* -------------------------------------------------------------------------- */
 /*  Tunables                                                                   */
@@ -64,6 +67,12 @@ const SOURCE_SNIPPET_MAX = SEARCH_SNIPPET_MAX
 const RERANK_POOL = 18
 /** Max web results to retain when the web-fallback flag is on. */
 const WEB_MAX_SOURCES = 4
+/** How many of the top web hits to deep-extract (full page content) via Tavily Extract. */
+const WEB_EXTRACT_TOP = 2
+/** Prompt-context cap for a web entry. Larger than SNIPPET_MAX because deep-
+ *  extracted pages carry the real facts — but still bounded so a 25 KB article
+ *  doesn't blow the context window. */
+const WEB_SNIPPET_MAX = 2500
 /** Max base64-inline size for an attachment when the server URL isn't fetchable. */
 const MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024
 
@@ -173,6 +182,14 @@ have no info on, current events, prices, etc.), reply concisely:
 voir en ligne."  (or the English equivalent if the user is writing in
 English). Do NOT invent facts. Do NOT pretend you searched.`
 
+const SYSTEM_PROMPT_WEB_AVAILABLE = `You have a \`web_search\` tool. Use it ONLY when the answer is not already in
+CONTEXT and requires external/current information (current events, prices,
+people/products/companies the notes don't cover). If CONTEXT already answers
+the question, reply directly — do NOT search. When you do search, call
+\`web_search\` with a single focused query and write nothing else that turn;
+the search results will come back and you'll answer from them. Never claim you
+searched when you didn't.`
+
 const SYSTEM_PROMPT_WEB_ON_HIT = `Web search ran for this turn and returned results, marked "(Web)" in CONTEXT.
 
 How to use web results correctly:
@@ -196,62 +213,6 @@ NOT pretend further search is happening; do NOT invent facts.`
  * generic search). All tool calls go through a user-approval gate.
  */
 const TOOLS_SYSTEM_PROMPT = `You may also call note-mutation tools (\`create_note\`, \`update_note\`, \`delete_note\`) when the user explicitly asks you to author or modify a note. Every tool call requires the user's approval before it runs — so be clear about what you intend to do. Prefer a single tool call per turn.`
-
-/**
- * Heuristic intent detector: did the user just ask us to look online?
- * Matches French / English phrasings so we auto-enable web search for that
- * single turn even when the toggle is off. False-positive cost is one
- * web_search call (~$0.002); false-negative cost is the bad UX where the
- * user keeps asking and we keep refusing. Tilt toward catching too much.
- *
- * The detector fires when ANY of these are true:
- *  - the message mentions web/internet/google/en ligne (even as a single
- *    word — "Web ?" / "internet ?" / "google" is enough),
- *  - the message contains a search verb (cherche/recherche/search/look up…),
- *  - the message is a short affirmative ("oui", "vas-y", "ok", "yes")
- *    AND the prior assistant turn offered to look elsewhere.
- */
-function asksForWebSearch(message: string, lastAssistantText: string): boolean {
-  const m = message.toLowerCase().trim()
-  if (m.length === 0) return false
-
-  // 1. Any explicit mention of the web / a search engine — strongest signal.
-  //    Word-boundary so "webhook" doesn't trip it.
-  if (/\b(web|internet|en[\s-]?ligne|online|google|googler|duckduckgo|bing)\b/.test(m)) {
-    return true
-  }
-
-  // 2. Search verbs (cherche / recherche / search / look up / fais une recherche).
-  const verbs = [
-    /\b(cherche|cherches|recherche|recherches|chercher|rechercher)\b/,
-    /\b(regarde|regardes|consulte|consultes|trouve|trouves)\b/,
-    /\b(search|searches|searching|google|googled|look(\s+it)?\s+up)\b/,
-    /\bfais\s+une\s+recherche\b/,
-    /\bbrowse(s|d)?\b/,
-  ]
-  for (const re of verbs) {
-    if (re.test(m)) return true
-  }
-
-  // 3. Short affirmative right after the assistant offered to look elsewhere.
-  const isShortAffirmative = /^(ok|oui|yes|vas[- ]?y|go(\s+ahead)?|please|s[iy]l? te pla[iî]t|stp|d'accord|sure)\b/.test(m)
-    && m.length <= 40
-  if (isShortAffirmative) {
-    const lat = lastAssistantText.toLowerCase()
-    if (lat.length > 0 && (
-      lat.includes('ailleurs')
-      || lat.includes('online')
-      || lat.includes('elsewhere')
-      || lat.includes('web')
-      || lat.includes('chercher')
-      || lat.includes('en ligne')
-      || lat.includes('cette information')
-    )) {
-      return true
-    }
-  }
-  return false
-}
 
 function truncate(s: string, n: number): string {
   const cleaned = s.replace(/\s+/g, ' ').trim()
@@ -289,336 +250,6 @@ function isLocalHost(host: string): boolean {
     || /^10\./.test(h)
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Web fallback (best-effort tool-call parsing)                               */
-/* -------------------------------------------------------------------------- */
-
-interface WebHit {
-  title: string
-  url: string
-  snippet: string
-}
-
-/**
- * Run a one-shot non-streaming Mistral call with the `web_search` tool to
- * collect a small set of URLs the model thinks are relevant to the question.
- * We DON'T try to parse the streaming tool deltas — this side-call is the
- * cheap, safe way to surface web sources alongside note ones.
- *
- * Failure-soft: returns an empty array on any error.
- */
-/**
- * Pick a model that Mistral actually supports `web_search` on. Small models
- * are silently ignored. `mistral-medium-latest` is the cheapest tier that
- * accepts the built-in connector.
- */
-function coerceWebSearchModel(baseModel: string): string {
-  const m = baseModel.toLowerCase()
-  if (m.includes('small') || m.includes('tiny') || m.includes('ministral')) {
-    return 'mistral-medium-latest'
-  }
-  // Magistral/reasoning + vision models stay; they generally support the connector.
-  return baseModel
-}
-
-interface ConversationsResponse {
-  conversation_id?: string
-  /** Some response shapes carry top-level references alongside outputs. */
-  references?: Array<{ url?: string, title?: string, snippet?: string }>
-  outputs?: Array<{
-    type?: string                      // 'message.output' | 'tool.execution' | 'function.result' …
-    role?: string
-    name?: string                       // tool name (e.g. 'web_search')
-    function?: string                   // legacy alias for `name`
-    content?:
-      | string
-      | Array<{
-        type?: string
-        text?: string
-        reference?: { url?: string, title?: string, snippet?: string, source?: string }
-        url?: string
-        title?: string
-        snippet?: string
-      }>
-    references?: Array<{ url?: string, title?: string, snippet?: string }>
-    /** Observed Mistral conversations shape: `info.result` is a JSON-encoded
-     *  STRING of an object keyed by stringified index ("0","1","2") containing
-     *  `{ url, title, description, snippets[] }` per hit. */
-    info?: { result?: string | unknown }
-    /** Alt shapes seen in other Mistral connectors. */
-    output?:
-      | { results?: Array<{ url?: string, title?: string, snippet?: string, description?: string }> }
-      | Array<{ url?: string, title?: string, snippet?: string, description?: string }>
-      | string
-    results?: Array<{ url?: string, title?: string, snippet?: string, description?: string }>
-  }>
-}
-
-/**
- * One-shot web search via Mistral's **Conversations API** (`/v1/conversations`).
- *
- * Why this endpoint specifically: the built-in `web_search` connector is NOT
- * exposed on `/v1/chat/completions` — that endpoint only accepts user-defined
- * `type: "function"` tools. Sending `tools: [{type:"web_search"}]` there is
- * silently ignored, which is why the previous implementation always returned
- * zero hits. The Conversations API IS the documented surface for built-in
- * connectors. Each call starts a fresh conversation; we ignore the
- * conversation_id (no state, no follow-ups). Only the query leaves NoteForge,
- * matching the at-rest threat model (notes never travel here).
- *
- * Failure-soft: returns `{ hits: [], debug }` on any error. The `debug`
- * payload is surfaced to the client so the user can paste it back when
- * web search misbehaves.
- */
-async function gatherWebSources(
-  question: string,
-  userId: number,
-  baseModel: string,
-): Promise<{ hits: WebHit[], debug: { endpoint: string, model: string, status: number | null, error?: string, rawSample?: string } }> {
-  const model = coerceWebSearchModel(baseModel)
-  const endpoint = 'https://api.mistral.ai/v1/conversations'
-  const debug: { endpoint: string, model: string, status: number | null, error?: string, rawSample?: string, parserVersion?: string } = {
-    endpoint,
-    model,
-    status: null,
-    // Bumped whenever the parser logic changes — gives us a quick "are my edits
-    // live?" signal when reading a pasted debug blob.
-    parserVersion: 'v4-info-result-2026-05-28',
-  }
-
-  // Resolve API key without crashing if it's missing.
-  const cfg = useRuntimeConfig()
-  const apiKey = cfg.mistralApiKey as string | undefined
-  if (!apiKey || typeof apiKey !== 'string') {
-    debug.error = 'MISTRAL_API_KEY missing'
-    return { hits: [], debug }
-  }
-
-  const start = Date.now()
-  let res: Response
-  try {
-    res = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        inputs: question,
-        tools: [{ type: 'web_search' }],
-        // No system prompt — the connector reads the user input directly.
-        // No stream/store flags — one-shot, throwaway conversation.
-      }),
-    })
-  }
-  catch (err) {
-    debug.error = `network: ${(err as Error).message ?? 'unknown'}`
-    console.warn('[ai/chat] web fallback network error:', debug.error)
-    return { hits: [], debug }
-  }
-
-  debug.status = res.status
-
-  if (!res.ok) {
-    let body = ''
-    try { body = await res.text() } catch { /* noop */ }
-    debug.error = body ? `HTTP ${res.status}: ${body.slice(0, 240)}` : `HTTP ${res.status}`
-    console.warn(`[ai/chat] web fallback ${endpoint} ${res.status} (${Date.now() - start}ms):`, body.slice(0, 500))
-    return { hits: [], debug }
-  }
-
-  let json: ConversationsResponse
-  try {
-    json = (await res.json()) as ConversationsResponse
-  }
-  catch (err) {
-    debug.error = `parse: ${(err as Error).message ?? 'unknown'}`
-    return { hits: [], debug }
-  }
-
-  // Snapshot a trimmed sample of the raw response — invaluable for diagnosing
-  // shape mismatches. 4000 chars covers a typical conversations response
-  // with the message.output + tool.execution outputs.
-  try {
-    debug.rawSample = JSON.stringify(json).slice(0, 4000)
-  }
-  catch { /* circular — shouldn't happen on plain JSON, ignore */ }
-
-  // Full-fat diagnostic dump to the server console — only when the operator
-  // explicitly enables it via DEBUG_WEB_SEARCH=1. Useful when the trimmed
-  // sample isn't enough to reverse-engineer Mistral's exact response shape.
-  if (process.env.DEBUG_WEB_SEARCH === '1') {
-    try {
-      console.log('[ai/chat] web_search raw response:\n', JSON.stringify(json, null, 2))
-    }
-    catch { /* noop */ }
-  }
-
-  const hits: WebHit[] = []
-  const seenUrls = new Set<string>()
-
-  const tryAddHit = (url: unknown, title: unknown, snippet: unknown) => {
-    if (typeof url !== 'string' || url.length === 0) return
-    if (seenUrls.has(url)) return
-    if (hits.length >= WEB_MAX_SOURCES) return
-    seenUrls.add(url)
-    hits.push({
-      title: typeof title === 'string' && title.length > 0 ? title : safeHost(url),
-      url,
-      snippet: typeof snippet === 'string' ? snippet : '',
-    })
-  }
-
-  let synthesizedAnswer = ''
-
-  // 0) Top-level references (some shapes put them here, outside outputs[]).
-  if (Array.isArray(json.references)) {
-    for (const r of json.references) tryAddHit(r.url, r.title, r.snippet)
-  }
-
-  for (const out of json.outputs ?? []) {
-    if (hits.length >= WEB_MAX_SOURCES) break
-
-    // 1) message.output level references
-    if (Array.isArray(out.references)) {
-      for (const r of out.references) tryAddHit(r.url, r.title, r.snippet)
-    }
-
-    // 2) Array-form content with embedded ReferenceChunks
-    if (Array.isArray(out.content)) {
-      for (const part of out.content) {
-        if (!part || typeof part !== 'object') continue
-        const ref = part.reference
-        const url = ref?.url ?? part.url
-        tryAddHit(url, ref?.title ?? part.title, ref?.snippet ?? part.snippet)
-      }
-    }
-
-    const isToolExec = typeof out.type === 'string' && (
-      out.type.includes('tool')
-      || out.type.includes('function')
-      || out.type === 'tool.execution'
-    )
-
-    // 3a) tool.execution with `info.result` — the actual observed Mistral
-    //     web_search shape. `info.result` is a JSON-encoded STRING of an
-    //     object keyed by stringified index ("0","1","2") with rich
-    //     {url,title,description,snippets[]} per hit. THIS is where the
-    //     content lives — empty snippets here means the downstream model
-    //     gets no usable context and ends up saying "I don't have this info".
-    if (isToolExec && out.info && typeof out.info === 'object') {
-      const raw = (out.info as { result?: unknown }).result
-      let parsed: unknown = raw
-      if (typeof raw === 'string') {
-        try { parsed = JSON.parse(raw) }
-        catch { parsed = null }
-      }
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        // Sort by numeric key so the order matches Mistral's ranking.
-        const entries = Object.entries(parsed as Record<string, unknown>)
-          .sort((a, b) => (Number(a[0]) || 0) - (Number(b[0]) || 0))
-        for (const [, entry] of entries) {
-          if (!entry || typeof entry !== 'object') continue
-          const e = entry as {
-            url?: unknown
-            title?: unknown
-            description?: unknown
-            snippet?: unknown
-            snippets?: unknown
-          }
-          // Build a rich snippet: description + first 2 snippet strings,
-          // joined with em-dashes so the downstream model has actual facts
-          // to cite from instead of an empty placeholder.
-          const parts: string[] = []
-          if (typeof e.description === 'string' && e.description.length > 0) {
-            parts.push(e.description)
-          }
-          if (Array.isArray(e.snippets)) {
-            let added = 0
-            for (const s of e.snippets) {
-              if (added >= 2) break
-              if (typeof s === 'string' && s.length > 0) {
-                parts.push(s)
-                added++
-              }
-            }
-          }
-          else if (typeof e.snippet === 'string' && e.snippet.length > 0) {
-            parts.push(e.snippet)
-          }
-          tryAddHit(e.url, e.title, parts.join(' — '))
-          if (hits.length >= WEB_MAX_SOURCES) break
-        }
-      }
-    }
-
-    // 3b) tool.execution outputs (other documented shapes for built-in
-    //     connectors). Shapes vary:
-    //       { type: 'tool.execution', name: 'web_search', output: { results: [...] } }
-    //       { type: 'tool.execution', output: [ {url,title,snippet}, ... ] }
-    //       { type: 'tool.execution', results: [...] }
-    if (isToolExec || Array.isArray(out.results)) {
-      // Pull the array out of whichever shape is present.
-      let arr: Array<{ url?: string, title?: string, snippet?: string, description?: string }> = []
-      if (Array.isArray(out.results)) arr = out.results
-      else if (Array.isArray(out.output)) arr = out.output
-      else if (out.output && typeof out.output === 'object' && 'results' in out.output && Array.isArray((out.output as { results?: unknown }).results)) {
-        arr = (out.output as { results: Array<{ url?: string, title?: string, snippet?: string, description?: string }> }).results
-      }
-      for (const r of arr) {
-        tryAddHit(r.url, r.title, r.snippet ?? r.description)
-      }
-    }
-
-    // 4) Capture any synthesized text — used as a last-resort fallback below
-    //    so the user at least sees Mistral's own write-up when no structured
-    //    refs are surfaced.
-    if (typeof out.content === 'string' && out.content.length > 0) {
-      synthesizedAnswer += (synthesizedAnswer.length > 0 ? '\n\n' : '') + out.content
-    }
-  }
-
-  // 5) Fallback A — pull markdown links / bare URLs from the synthesized text.
-  //    Mistral often inlines `[Source title](https://…)` after the answer.
-  if (hits.length < WEB_MAX_SOURCES && synthesizedAnswer.length > 0) {
-    const mdLink = /\[([^\]]{1,120})\]\((https?:\/\/[^\s)]+)\)/g
-    for (const m of synthesizedAnswer.matchAll(mdLink)) {
-      tryAddHit(m[2], m[1], '')
-      if (hits.length >= WEB_MAX_SOURCES) break
-    }
-  }
-  if (hits.length < WEB_MAX_SOURCES && synthesizedAnswer.length > 0) {
-    const bareUrl = /https?:\/\/[^\s)<>"]+/g
-    for (const m of synthesizedAnswer.matchAll(bareUrl)) {
-      tryAddHit(m[0], '', '')
-      if (hits.length >= WEB_MAX_SOURCES) break
-    }
-  }
-
-  // 6) Fallback B — no structured refs AND no URLs in the text, but Mistral
-  //    DID write a synthesized answer. Surface it as a single pseudo-source
-  //    so the user actually sees Mistral's findings instead of "no results".
-  if (hits.length === 0 && synthesizedAnswer.length > 0) {
-    hits.push({
-      title: 'Mistral web synthesis',
-      url: 'https://mistral.ai/',
-      snippet: synthesizedAnswer.slice(0, 600),
-    })
-    debug.error = 'no structured refs — used synthesized text as fallback source'
-  }
-
-  if (hits.length === 0) {
-    debug.error = debug.error ?? 'no references and no synthesized text'
-  }
-  return { hits, debug }
-}
-
-function safeHost(url: string): string {
-  try { return new URL(url).hostname }
-  catch { return url.slice(0, 40) }
-}
 
 /* -------------------------------------------------------------------------- */
 /*  Suggested follow-ups (N4)                                                   */
@@ -663,6 +294,27 @@ async function generateFollowups(question: string, answer: string, userId: numbe
 /* -------------------------------------------------------------------------- */
 /*  Agentic tool descriptors (N8)                                              */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * Web-search function tool offered to the model on every turn (when a Tavily
+ * key is configured). The model decides whether to call it — "enabled by
+ * default, used if needed". When it fires we run Tavily, fold the hits into
+ * CONTEXT, and re-stream the answer (see the handler's streaming loop).
+ */
+const WEB_SEARCH_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'web_search',
+    description: 'Search the public web for current or external facts that are NOT in the user\'s notes (current events, prices, people/products/companies the notes do not cover). Do not call this when the answer is already in CONTEXT.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'A focused web search query. Resolve pronouns/anaphora from the conversation into a standalone query.' },
+      },
+      required: ['query'],
+    },
+  },
+}
 
 const WRITE_TOOLS = [
   {
@@ -981,56 +633,34 @@ export default defineEventHandler(async (event) => {
     }
   }
 
-  /* ---------- 5b. Web fallback (Wave 2 / N5) ----------------------------- */
-  // The toggle is the user's persistent opt-in. We ALSO auto-detect natural-
-  // language intent ("cherche sur le web", "vas-y", "search the web") so
-  // users don't have to click a checkbox to get the behaviour they're asking
-  // for. `webAutoTriggered` is forwarded to the client so the UI can flash
-  // a small "web search auto-enabled for this turn" badge.
-  const lastAssistantTurn = historyMessages
-    .slice()
-    .reverse()
-    .find(m => m.role === 'assistant')
-  const lastAssistantText = typeof lastAssistantTurn?.content === 'string'
-    ? lastAssistantTurn.content
-    : ''
-  const webAutoTriggered = !input.webFallback && asksForWebSearch(input.message, lastAssistantText)
-  const useWebSearch = input.webFallback || webAutoTriggered
+  /* ---------- 5b. Web search availability (Tavily tool) ------------------ */
+  // Web search is exposed to the model as a `web_search` function tool and is
+  // available on every turn when a Tavily key is configured ("enabled by
+  // default"). The MODEL decides whether to call it ("used if needed"). The
+  // persistent `webFallback` toggle, when on, FORCES the search this turn.
+  // The actual Tavily call happens inside the streaming loop (step 7), once we
+  // see the tool call — so `webSources` / `webDebug` start empty here and are
+  // filled in mid-stream.
+  const webEnabled = typeof (useRuntimeConfig().tavilyApiKey) === 'string'
+    && (useRuntimeConfig().tavilyApiKey as string).length > 0
+  const forceWeb = input.webFallback === true && webEnabled
 
   const webSources: WebSourceRef[] = []
-  let webDebug: { endpoint: string, model: string, status: number | null, error?: string, rawSample?: string } | null = null
-  if (useWebSearch) {
-    // Use the rewritten retrieval query — it resolves pronouns/anaphora from
-    // history ("Web ?" → "qui est l'éditeur de Timify, sur le web ?") so the
-    // web tool isn't given a meaningless one-word query.
-    const result = await gatherWebSources(retrievalQuery, user.id, input.model ?? 'mistral-medium-latest')
-    webDebug = result.debug
-    for (const h of result.hits) {
-      webSources.push({
-        docId: 0,
-        chunkIdx: 0,
-        snippet: truncate(h.snippet, SOURCE_SNIPPET_MAX),
-        title: h.title,
-        url: h.url,
-      })
-    }
-  }
-
-  const sources: AnySource[] = [...noteSources, ...webSources]
+  let webDebug: WebSearchDebug | null = null
+  let sources: AnySource[] = [...noteSources]
 
   /* ---------- 6. Build the prompt ---------------------------------------- */
-  let contextBlock = ''
-  if (sources.length > 0) {
+  // The CONTEXT block is rebuilt whenever the source pool changes (e.g. after
+  // a web search folds new hits in), so the [#N] citation numbering stays
+  // consistent between the prompt and the post-stream refinement.
+  function buildContextBlock(srcs: AnySource[]): string {
+    if (srcs.length === 0) return 'CONTEXT: (no notes matched this query)'
     const lines: string[] = ['CONTEXT (retrieved from the user\'s notes and the web):']
-    sources.forEach((s, i) => {
+    srcs.forEach((s, i) => {
       const isWeb = 'url' in s
-      const tag = isWeb ? 'Web' : 'Note'
-      lines.push(`[#${i + 1}] (${tag}) ${s.title} — ${truncate(s.snippet, SNIPPET_MAX)}`)
+      lines.push(`[#${i + 1}] (${isWeb ? 'Web' : 'Note'}) ${s.title} — ${truncate(s.snippet, isWeb ? WEB_SNIPPET_MAX : SNIPPET_MAX)}`)
     })
-    contextBlock = lines.join('\n')
-  }
-  else {
-    contextBlock = 'CONTEXT: (no notes matched this query)'
+    return lines.join('\n')
   }
 
   // The "real" user message — string when plain, array when an image was attached.
@@ -1041,28 +671,24 @@ export default defineEventHandler(async (event) => {
       ]
     : input.message
 
-  // Assemble the system prompt: base policy + capability disclosure (so the
-  // model never pretends to do background work it can't actually do) + the
-  // retrieved CONTEXT block + optional tools clause.
-  const capabilityClause = !useWebSearch
-    ? SYSTEM_PROMPT_WEB_OFF
-    : webSources.length > 0
-      ? SYSTEM_PROMPT_WEB_ON_HIT
-      : SYSTEM_PROMPT_WEB_ON_MISS
-  const systemMessages: MistralMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT_BASE },
-    { role: 'system', content: capabilityClause },
-    { role: 'system', content: contextBlock },
-  ]
-  if (input.allowWrites) {
-    systemMessages.push({ role: 'system', content: TOOLS_SYSTEM_PROMPT })
+  // Assemble the full message list: base policy + capability disclosure + the
+  // retrieved CONTEXT block + optional tools clause, then history + user turn.
+  // `capabilityClause` shifts across passes: before any web search the model is
+  // told it HAS a web_search tool; after one runs it gets the hit/miss guidance.
+  function composeMessages(capabilityClause: string, srcs: AnySource[]): MistralMessage[] {
+    const systemMessages: MistralMessage[] = [
+      { role: 'system', content: SYSTEM_PROMPT_BASE },
+      { role: 'system', content: capabilityClause },
+      { role: 'system', content: buildContextBlock(srcs) },
+    ]
+    if (input.allowWrites) {
+      systemMessages.push({ role: 'system', content: TOOLS_SYSTEM_PROMPT })
+    }
+    return [...systemMessages, ...historyMessages, { role: 'user', content: finalUserContent }]
   }
 
-  const messages: MistralMessage[] = [
-    ...systemMessages,
-    ...historyMessages,
-    { role: 'user', content: finalUserContent },
-  ]
+  const initialCapabilityClause = webEnabled ? SYSTEM_PROMPT_WEB_AVAILABLE : SYSTEM_PROMPT_WEB_OFF
+  const messages: MistralMessage[] = composeMessages(initialCapabilityClause, sources)
 
   /* ---------- 6b. Model routing ------------------------------------------ */
   // Vision wins when an image is in play and the caller didn't pin a model.
@@ -1120,39 +746,10 @@ export default defineEventHandler(async (event) => {
 
       send({ type: 'session', sessionId: finalSessionId })
 
-      // Tell the client we auto-triggered web search for this turn so it can
-      // surface a small "🌐 web search auto-enabled" badge under the bubble.
-      if (webAutoTriggered) {
-        send({ type: 'web_auto', hits: webSources.length })
-      }
-
-      // Per-turn meta for the debug panel: model, web search state,
-      // retrieval query, scope. Trimmed so it's safe to log/copy.
-      // `chatModel` may be undefined when the caller didn't override — in
-      // that case Mistral falls through to `cfg.mistralChatModel`, which we
-      // mirror here so the panel shows what actually ran.
-      const effectiveModel = chatModel
-        ?? (useRuntimeConfig().mistralChatModel as string | undefined)
-        ?? 'mistral-medium-latest'
-      send({
-        type: 'meta',
-        model: effectiveModel,
-        webRequested: input.webFallback === true,
-        webAuto: webAutoTriggered,
-        webHits: webSources.length,
-        webDebug,
-        noteHits: noteSources.length,
-        retrievalQuery: retrievalQuery.length > 240 ? `${retrievalQuery.slice(0, 240)}…` : retrievalQuery,
-        rewriterUsed,
-        rerankerUsed,
-        rerankScoreAvg: rerankScoreAvg ?? null,
-        reasoning: input.reasoning === true,
-        attachmentId: input.attachmentId ?? null,
-        allowWrites,
-        scopeDocId: effectiveDocId,
-        scopeFolderId: effectiveFolderId,
-        temperature: chatTemperature,
-      })
+      // Whether the model actually ran a web search this turn — resolved during
+      // streaming when it calls the `web_search` tool. Drives the final `meta`
+      // frame's web badge.
+      let webUsed = false
 
       // N9 — emit the working source list early so the UI can render a
       // "searching X, Y, Z" hint while the model still types. We deliberately
@@ -1208,43 +805,128 @@ export default defineEventHandler(async (event) => {
       }
 
       if (!toolCallEmitted) {
-        try {
-          for await (const ev of mistralChatStream({
-            messages,
-            temperature: chatTemperature,
-            userId,
-            operation: 'chat_stream',
-            ...(chatModel ? { model: chatModel } : {}),
-          })) {
-            if (ev.kind === 'text') {
-              collected += ev.text
-              send({ type: 'delta', text: ev.text })
-            }
-            else if (ev.kind === 'reference') {
-              for (const r of ev.refs) {
-                if (typeof r.id === 'number' && r.id >= 1 && r.id <= sources.length) {
-                  nativeCited.add(r.id)
-                  continue
+        // Up to two passes. Pass 1 offers the `web_search` tool; if the model
+        // calls it we run Tavily (search + deep-extract), fold the hits into
+        // CONTEXT, and pass 2 answers from the enriched context with no tools.
+        // The common case (no web needed) finishes in pass 1.
+        let passMessages = messages
+        let passTools: Array<Record<string, unknown>> | undefined = webEnabled ? [WEB_SEARCH_TOOL] : undefined
+        let passToolChoice: string | Record<string, unknown> | undefined = webEnabled
+          ? (forceWeb ? { type: 'function', function: { name: 'web_search' } } : 'auto')
+          : undefined
+
+        for (let pass = 0; pass < 2; pass++) {
+          let pendingWebQuery: string | null = null
+          let textThisPass = false
+          try {
+            for await (const ev of mistralChatStream({
+              messages: passMessages,
+              temperature: chatTemperature,
+              userId,
+              operation: 'chat_stream',
+              ...(passTools ? { tools: passTools, toolChoice: passToolChoice } : {}),
+              ...(chatModel ? { model: chatModel } : {}),
+            })) {
+              if (ev.kind === 'text') {
+                collected += ev.text
+                textThisPass = true
+                send({ type: 'delta', text: ev.text })
+              }
+              else if (ev.kind === 'reference') {
+                for (const r of ev.refs) {
+                  if (typeof r.id === 'number' && r.id >= 1 && r.id <= sources.length) {
+                    nativeCited.add(r.id)
+                    continue
+                  }
+                  if (typeof r.url === 'string' && r.url.length > 0) {
+                    const idx = sources.findIndex(s => 'url' in s && (s as WebSourceRef).url === r.url)
+                    if (idx >= 0) { nativeCited.add(idx + 1); continue }
+                  }
+                  if (typeof r.title === 'string' && r.title.length > 0) {
+                    const needle = r.title.trim().toLowerCase()
+                    const idx = sources.findIndex(s => s.title.trim().toLowerCase() === needle)
+                    if (idx >= 0) { nativeCited.add(idx + 1); continue }
+                  }
                 }
-                if (typeof r.url === 'string' && r.url.length > 0) {
-                  const idx = sources.findIndex(s => 'url' in s && (s as WebSourceRef).url === r.url)
-                  if (idx >= 0) { nativeCited.add(idx + 1); continue }
-                }
-                if (typeof r.title === 'string' && r.title.length > 0) {
-                  const needle = r.title.trim().toLowerCase()
-                  const idx = sources.findIndex(s => s.title.trim().toLowerCase() === needle)
-                  if (idx >= 0) { nativeCited.add(idx + 1); continue }
+              }
+              else if (ev.kind === 'tool_call') {
+                // Honor a web_search call only if the model led with it (no answer
+                // text streamed yet) and we haven't already searched this turn.
+                if (!webUsed && !textThisPass && collected.length === 0) {
+                  const wc = ev.calls.find(c => c.name === 'web_search')
+                  if (wc) {
+                    let q = retrievalQuery
+                    try {
+                      const parsedArgs = JSON.parse(wc.arguments) as { query?: unknown }
+                      if (typeof parsedArgs.query === 'string' && parsedArgs.query.trim().length > 0) {
+                        q = parsedArgs.query.trim()
+                      }
+                    }
+                    catch { /* malformed args → fall back to the rewritten retrieval query */ }
+                    pendingWebQuery = q
+                  }
                 }
               }
             }
           }
-        }
-        catch (err) {
-          errored = true
-          const detail = (err as { data?: { detail?: string }, message?: string }).data?.detail
-            ?? (err as Error).message
-            ?? 'unknown error'
-          send({ type: 'error', error: 'mistral_failed', detail })
+          catch (err) {
+            errored = true
+            const detail = (err as { data?: { detail?: string }, message?: string }).data?.detail
+              ?? (err as Error).message
+              ?? 'unknown error'
+            send({ type: 'error', error: 'mistral_failed', detail })
+            break
+          }
+
+          // No web search requested → the streamed text is the answer.
+          if (!pendingWebQuery || webUsed) break
+
+          webUsed = true
+          send({ type: 'tool_step', tool: 'web_search', status: 'running', query: truncate(pendingWebQuery, 200) })
+
+          const searchResult = await tavilySearch(pendingWebQuery, { maxResults: WEB_MAX_SOURCES })
+          webDebug = searchResult.debug
+
+          // Deep-extract the top hits for full page content; fall back to the
+          // search snippet for the rest (and on any extract failure).
+          const topUrls = searchResult.hits.slice(0, WEB_EXTRACT_TOP).map(h => h.url)
+          let extractByUrl = new Map<string, string>()
+          if (topUrls.length > 0) {
+            const ext = await tavilyExtract(topUrls)
+            extractByUrl = ext.byUrl
+          }
+          for (const h of searchResult.hits) {
+            const extracted = extractByUrl.get(h.url)
+            const body = extracted && extracted.length > 0 ? extracted : h.snippet
+            webSources.push({
+              docId: 0,
+              chunkIdx: 0,
+              snippet: truncate(body, WEB_SNIPPET_MAX),
+              title: h.title,
+              url: h.url,
+            })
+          }
+          sources = [...noteSources, ...webSources]
+
+          // Surface the finished search + its sources to the client.
+          send({ type: 'tool_step', tool: 'web_search', status: 'done', query: truncate(pendingWebQuery, 200), hits: webSources.length })
+          if (webSources.length > 0) {
+            const webPartial = webSources.map(s => ({
+              docId: s.docId,
+              chunkIdx: s.chunkIdx,
+              title: s.title,
+              snippet: truncate(s.snippet, SOURCE_SNIPPET_MAX),
+              kind: 'web' as const,
+              url: s.url,
+            }))
+            send({ type: 'partial_sources', sources: [...partialSourcesForClient, ...webPartial] })
+          }
+
+          // Recompose for pass 2: enriched CONTEXT + hit/miss guidance, no tools.
+          const clause = webSources.length > 0 ? SYSTEM_PROMPT_WEB_ON_HIT : SYSTEM_PROMPT_WEB_ON_MISS
+          passMessages = composeMessages(clause, sources)
+          passTools = undefined
+          passToolChoice = undefined
         }
       }
 
@@ -1260,7 +942,9 @@ export default defineEventHandler(async (event) => {
         refined.push({
           docId: s.docId,
           chunkIdx: s.chunkIdx,
-          snippet: s.snippet,
+          // Clamp to the display cap — web entries hold up to WEB_SNIPPET_MAX of
+          // extracted page text for the prompt, far more than a chip should show.
+          snippet: truncate(s.snippet, SOURCE_SNIPPET_MAX),
           title: s.title,
           citation: n,
           highlight: isWeb ? '' : bestSentence(s.snippet, collected),
@@ -1280,6 +964,37 @@ export default defineEventHandler(async (event) => {
         ...(s.kind ? { kind: s.kind } : {}),
         ...(s.url ? { url: s.url } : {}),
       }))
+
+      // ---- Follow-ups (computed before persist so they can be saved) -------
+      // Follow-ups make no sense when we just emitted a tool-call card — the
+      // user's next action is "approve / reject", not "ask a follow-up".
+      const followups = !errored && !toolCallEmitted && collected.trim().length > 0
+        ? await generateFollowups(userMessage, collected, userId)
+        : []
+
+      // ---- Per-turn meta (persisted + sent for the debug panel / web badge) -
+      const effectiveModel = chatModel
+        ?? (useRuntimeConfig().mistralChatModel as string | undefined)
+        ?? 'mistral-medium-latest'
+      const metaObj = {
+        model: effectiveModel,
+        webRequested: input.webFallback === true,
+        webAuto: webUsed && input.webFallback !== true,
+        webUsed,
+        webHits: webSources.length,
+        webDebug,
+        noteHits: noteSources.length,
+        retrievalQuery: retrievalQuery.length > 240 ? `${retrievalQuery.slice(0, 240)}…` : retrievalQuery,
+        rewriterUsed,
+        rerankerUsed,
+        rerankScoreAvg: rerankScoreAvg ?? null,
+        reasoning: input.reasoning === true,
+        attachmentId: input.attachmentId ?? null,
+        allowWrites,
+        scopeDocId: effectiveDocId,
+        scopeFolderId: effectiveFolderId,
+        temperature: chatTemperature,
+      }
 
       let persistedMessageId: number | null = null
       let persistedCreatedAt: number | null = null
@@ -1302,6 +1017,11 @@ export default defineEventHandler(async (event) => {
             })),
             dek,
           ),
+          // History parity: persist the follow-up chips + meta so reopening the
+          // session renders identically to the live turn (instead of a bare
+          // content + sources).
+          followups: encryptChatFollowups(followups, dek),
+          meta: encryptChatMeta(metaObj, dek),
         }).returning({ id: chatMessages.id, createdAt: chatMessages.createdAt })
         if (row) {
           persistedMessageId = row.id
@@ -1315,11 +1035,9 @@ export default defineEventHandler(async (event) => {
       }
 
       if (!errored) {
-        // Follow-ups make no sense when we just emitted a tool-call card —
-        // the user's next action is "approve / reject", not "ask follow-up".
-        const followups = !toolCallEmitted && collected.trim().length > 0
-          ? await generateFollowups(userMessage, collected, userId)
-          : []
+        // Meta first so the debug panel / web badge can populate, then the
+        // follow-up chips, then the terminal `done` frame.
+        send({ type: 'meta', ...metaObj })
 
         if (followups.length > 0) {
           send({ type: 'followups', items: followups })

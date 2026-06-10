@@ -821,6 +821,19 @@ export const chatMessages = sqliteTable(
      * buttons in the chat drawer; only meaningful for assistant rows.
      */
     userFeedback: integer('user_feedback'),
+    /**
+     * Suggested follow-up question chips (Wave 5). Encrypted JSON string of
+     * `string[]` (plain TEXT, whole-value envelope — never SQL-queried). NULL
+     * for legacy rows / user messages. Persisted so reopening a session shows
+     * the same follow-up chips as the live turn.
+     */
+    followups: text('followups'),
+    /**
+     * Per-turn assistant metadata (model, web-search state, retrieval query,
+     * scope, temperature…) as an encrypted JSON string. Backs the debug panel
+     * and the "web search ran" badge on reload. NULL for legacy / user rows.
+     */
+    meta: text('meta'),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .default(sql`(unixepoch())`),

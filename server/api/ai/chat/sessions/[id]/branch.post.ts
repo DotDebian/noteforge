@@ -21,7 +21,9 @@ import { assertWorkspaceOwnership, parseIdParam } from '~/server/utils/access'
 import { decryptField } from '~/server/utils/crypto'
 import { getDek } from '~/server/utils/dek'
 import {
+  decryptChatFollowups,
   decryptChatMessageContent,
+  decryptChatMeta,
   decryptChatSources,
   encryptChatSessionTitle,
 } from '~/server/utils/encrypted-entities'
@@ -121,6 +123,9 @@ export default defineEventHandler(async (event) => {
     role: m.role,
     content: m.content,
     sources: m.sources,
+    // Copy ciphertext verbatim so branched turns keep their follow-ups + meta.
+    followups: m.followups,
+    meta: m.meta,
   }))
 
   const inserted = await db
@@ -134,6 +139,8 @@ export default defineEventHandler(async (event) => {
       ...m,
       content: decryptChatMessageContent(m.content, dek),
       sources: decryptChatSources(m.sources, dek),
+      followups: decryptChatFollowups(m.followups, dek),
+      meta: decryptChatMeta(m.meta, dek),
     })),
   }
 })

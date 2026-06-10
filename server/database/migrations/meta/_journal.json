@@ -169,6 +169,13 @@
       "when": 1781200000000,
       "tag": "0023_sturdy_skin",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1781084467424,
+      "tag": "0024_lazy_revanche",
+      "breakpoints": true
     }
   ]
 }

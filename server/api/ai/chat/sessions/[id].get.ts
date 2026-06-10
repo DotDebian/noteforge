@@ -6,7 +6,9 @@ import { parseIdParam } from '~/server/utils/access'
 import { decryptField } from '~/server/utils/crypto'
 import { getDek } from '~/server/utils/dek'
 import {
+  decryptChatFollowups,
   decryptChatMessageContent,
+  decryptChatMeta,
   decryptChatSources,
 } from '~/server/utils/encrypted-entities'
 import { requireUser } from '~/server/utils/require-user'
@@ -40,6 +42,8 @@ export default defineEventHandler(async (event) => {
       ...m,
       content: decryptChatMessageContent(m.content, dek),
       sources: decryptChatSources(m.sources, dek),
+      followups: decryptChatFollowups(m.followups, dek),
+      meta: decryptChatMeta(m.meta, dek),
     })),
   }
 })

@@ -687,6 +687,12 @@ const L = computed(() => locale.value === 'fr'
       webAutoOn: 'Recherche web activée pour ce tour',
       webAutoEmpty: 'Recherche web : aucun résultat',
       webAutoTitle: 'NoteForge a détecté que vous demandiez une recherche web et l’a lancée pour ce tour, même si l’option est désactivée.',
+      thinking: 'Réflexion…',
+      searchingWeb: 'Recherche web…',
+      writing: 'Rédaction…',
+      webStepRunning: 'Recherche sur le web',
+      webStepDone: 'Recherche web',
+      webStepResults: '{n} résultat(s)',
       debugCopy: 'Copier',
       debugCopied: 'Copié',
       debugCopyTitle: 'Copier les infos debug (à coller pour rapporter un souci)',
@@ -701,10 +707,30 @@ const L = computed(() => locale.value === 'fr'
       webAutoOn: 'Web search auto-enabled for this turn',
       webAutoEmpty: 'Web search returned no results',
       webAutoTitle: 'NoteForge detected a web-search intent in your message and ran a one-off search even though the option is off.',
+      thinking: 'Thinking…',
+      searchingWeb: 'Searching the web…',
+      writing: 'Writing…',
+      webStepRunning: 'Searching the web',
+      webStepDone: 'Web search',
+      webStepResults: '{n} result(s)',
       debugCopy: 'Copy',
       debugCopied: 'Copied',
       debugCopyTitle: 'Copy debug info (paste it back when reporting an issue)',
     })
+
+/**
+ * Label for the live "thinking / searching / writing" indicator shown under a
+ * still-pending assistant bubble, driven by the streamed `status` phase.
+ */
+function streamingLabel(m: UIChatMessage): string {
+  if (m.status === 'web') return L.value.searchingWeb
+  if (m.status === 'writing') return L.value.writing
+  return L.value.thinking
+}
+
+function webStepResultsLabel(n: number): string {
+  return L.value.webStepResults.replace('{n}', String(n))
+}
 
 /* ---------------- Composer focus + options popover ---------------- */
 
@@ -1058,11 +1084,33 @@ const scopeValue = computed(() => {
                     <!-- Streaming caret (Wave 4 / I9) -->
                     <span v-if="m.pending" class="stream-caret" aria-hidden="true">▍</span>
                   </div>
+                  <!-- Live activity indicator (Wave 5): Réflexion / Recherche web / Rédaction -->
+                  <div
+                    v-else-if="m.pending"
+                    class="thinking"
+                    aria-live="polite"
+                  >
+                    <span class="thinking-dots" aria-hidden="true"><i /><i /><i /></span>
+                    <span class="thinking-label">{{ streamingLabel(m) }}</span>
+                  </div>
                   <p
                     v-else
                     class="whitespace-pre-wrap break-words"
-                  >{{ m.pending ? '…' : '' }}</p>
+                  />
                 </template>
+
+                <!-- Visible web-search step (Wave 5) — the model called web_search -->
+                <div
+                  v-if="m.role === 'assistant' && m.webStep"
+                  class="web-step"
+                  :class="{ 'web-step--running': m.webStep.status === 'running' }"
+                >
+                  <span class="web-step-icon" aria-hidden="true">🌐</span>
+                  <span class="web-step-body">
+                    <span class="web-step-label">{{ m.webStep.status === 'running' ? L.webStepRunning : L.webStepDone }}<template v-if="m.webStep.status === 'done'"> · {{ webStepResultsLabel(m.webStep.hits) }}</template></span>
+                    <span v-if="m.webStep.query" class="web-step-query">{{ m.webStep.query }}</span>
+                  </span>
+                </div>
 
                 <!-- Partial sources hint (Wave 4 / N9) — only while streaming -->
                 <div
@@ -1261,11 +1309,11 @@ const scopeValue = computed(() => {
                     <template v-if="m.meta.webDebug">
                       <div class="debug-item">
                         <dt>Web endpoint</dt>
-                        <dd class="debug-query">{{ shortEndpoint(m.meta.webDebug.endpoint) }}</dd>
+                        <dd class="debug-query">{{ shortEndpoint(m.meta.webDebug.endpoint || '') }}</dd>
                       </div>
                       <div class="debug-item">
                         <dt>Web HTTP</dt>
-                        <dd>{{ m.meta.webDebug.status ?? '—' }} ({{ m.meta.webDebug.model }})</dd>
+                        <dd>{{ m.meta.webDebug.status ?? '—' }} ({{ m.meta.webDebug.provider || m.meta.webDebug.model || '—' }})</dd>
                       </div>
                       <div v-if="m.meta.webDebug.error" class="debug-item debug-item--wide">
                         <dt>Web error</dt>
@@ -2457,6 +2505,61 @@ html.dark .web-auto-badge {
   background: rgba(217, 119, 6, 0.14);
   color: theme('colors.accent.200');
   border-color: theme('colors.accent.800');
+}
+
+/* Live activity indicator (thinking / searching web / writing) */
+.thinking {
+  @apply inline-flex items-center gap-2 text-[13px] text-ink-500 dark:text-ink-400;
+}
+.thinking-dots {
+  @apply inline-flex items-center gap-1;
+}
+.thinking-dots i {
+  @apply inline-block h-1.5 w-1.5 rounded-full;
+  background: theme('colors.accent.500');
+  animation: thinking-bounce 1.2s ease-in-out infinite;
+}
+.thinking-dots i:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dots i:nth-child(3) { animation-delay: 0.4s; }
+html.dark .thinking-dots i { background: theme('colors.accent.300'); }
+@keyframes thinking-bounce {
+  0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-2px); }
+}
+
+/* Visible web-search step (the model called the web_search tool) */
+.web-step {
+  @apply mt-2 inline-flex max-w-full items-start gap-2 rounded-lg px-2.5 py-1.5 text-[12px];
+  background: theme('colors.accent.50');
+  border: 1px solid theme('colors.accent.200');
+}
+html.dark .web-step {
+  background: rgba(217, 119, 6, 0.12);
+  border-color: theme('colors.accent.800');
+}
+.web-step--running {
+  animation: web-step-pulse 1.4s ease-in-out infinite;
+}
+@keyframes web-step-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+.web-step-icon {
+  @apply leading-none;
+}
+.web-step-body {
+  @apply flex min-w-0 flex-col gap-0.5;
+}
+.web-step-label {
+  @apply font-sans text-[10.5px] font-semibold uppercase tracking-[0.06em];
+  color: theme('colors.accent.700');
+}
+html.dark .web-step-label {
+  color: theme('colors.accent.200');
+}
+.web-step-query {
+  @apply truncate text-ink-600 dark:text-ink-300;
+  max-width: 42ch;
 }
 
 /* Tool call cards */

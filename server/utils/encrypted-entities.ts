@@ -238,3 +238,44 @@ export function encryptChatMessageContent(content: string, dek: Buffer | null | 
 export function decryptChatMessageContent(content: Maybe<string>, dek: Buffer | null | undefined): string {
   return dec(content, dek)
 }
+
+/**
+ * Per-turn assistant metadata (model, web-search state, retrieval query, scope…)
+ * persisted alongside the message so reopening a session reconstructs the live
+ * debug panel + web badge. Stored as an encrypted JSON string in a plain TEXT
+ * column — never SQL-queried, so whole-value envelope encryption is fine.
+ */
+export type ChatMeta = Record<string, unknown>
+
+/** Follow-up suggestion chips. Encrypted JSON string of `string[]`. */
+export function encryptChatFollowups(followups: string[], dek: Buffer | null | undefined): string {
+  return enc(JSON.stringify(followups ?? []), dek)
+}
+
+export function decryptChatFollowups(value: Maybe<string>, dek: Buffer | null | undefined): string[] {
+  if (value === null || value === undefined || value === '') return []
+  try {
+    const parsed = JSON.parse(dec(value, dek)) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((q): q is string => typeof q === 'string')
+  }
+  catch {
+    return []
+  }
+}
+
+export function encryptChatMeta(meta: ChatMeta, dek: Buffer | null | undefined): string {
+  return enc(JSON.stringify(meta ?? {}), dek)
+}
+
+export function decryptChatMeta(value: Maybe<string>, dek: Buffer | null | undefined): ChatMeta | null {
+  if (value === null || value === undefined || value === '') return null
+  try {
+    const parsed = JSON.parse(dec(value, dek)) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    return parsed as ChatMeta
+  }
+  catch {
+    return null
+  }
+}
