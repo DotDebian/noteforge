@@ -19,6 +19,19 @@
  * migrated by drizzle is recognised correctly and only the truly-pending files
  * run.
  *
+ * **Self-healing on edited/renumbered migrations.** The hash scheme is fragile
+ * to one thing: editing (or regenerating/renumbering) a migration file that a
+ * DB has ALREADY applied. The recorded hash then no longer matches the file, so
+ * this runner sees the migration as "pending" and re-runs it — which explodes on
+ * `duplicate column name` / `table already exists`. To stay robust we adopt the
+ * hash when a re-run is a *complete DDL no-op*: if every CREATE/ALTER/DROP in the
+ * file collides with an object that already exists (and idempotent DML like the
+ * `UPDATE` in 0019 simply re-runs harmlessly), the migration was already fully
+ * applied, so we record its current hash and move on. A genuinely PARTIAL state
+ * — some DDL applies while other DDL collides — is ambiguous and unsafe to
+ * paper over, so it aborts loudly: that only happens when statements were ADDED
+ * to an already-deployed migration (which should have been a new migration).
+ *
  * It opens the SQLite file pointed at by $DATABASE_URL (defaulting to
  * /app/data/noteforge.db) and reads the SQL files from $MIGRATIONS_DIR.
  *
@@ -75,7 +88,26 @@ try {
     'INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)',
   )
 
+  // A re-run statement "collides" when its object already exists — i.e. the
+  // migration was already applied under a different (pre-edit) hash. SQLite's
+  // messages for these are stable across versions.
+  const isAlreadyApplied = err =>
+    err?.code === 'SQLITE_ERROR'
+    && /duplicate column name|already exists/i.test(String(err.message))
+
+  // Does a statement create/alter schema (so its success means real new DDL ran)
+  // vs. idempotent DML (UPDATE/INSERT/DELETE) that always "succeeds" on re-run
+  // and must NOT count toward the applied/collided tally?
+  const isDdl = (stmt) => {
+    const head = stmt
+      .replace(/^(?:\s|--[^\n]*\n|\/\*[\s\S]*?\*\/)+/, '')
+      .slice(0, 12)
+      .toUpperCase()
+    return head.startsWith('CREATE') || head.startsWith('ALTER') || head.startsWith('DROP')
+  }
+
   let appliedCount = 0
+  let adoptedCount = 0
   for (const entry of entries) {
     const file = join(migrationsFolder, `${entry.tag}.sql`)
     const raw = readFileSync(file, 'utf8')
@@ -88,18 +120,60 @@ try {
       .map(s => s.trim())
       .filter(s => s.length > 0)
 
+    // Tracks the DDL outcome of this (re-)run so we can tell a genuinely pending
+    // migration (all DDL applies) from an already-applied one (all DDL collides)
+    // from an unsafe partial state (a mix of both).
+    let ddlApplied = 0
+    let ddlCollided = 0
+
     const apply = sqlite.transaction(() => {
-      for (const stmt of statements) sqlite.exec(stmt)
+      ddlApplied = 0
+      ddlCollided = 0
+      for (const stmt of statements) {
+        try {
+          sqlite.exec(stmt)
+          if (isDdl(stmt)) ddlApplied++
+        }
+        catch (err) {
+          if (isAlreadyApplied(err)) {
+            ddlCollided++
+            continue
+          }
+          throw err
+        }
+      }
+      // A partial state — some DDL newly applied while other DDL already existed
+      // — means statements were added to a migration this DB had already run.
+      // Re-running can't reconstruct the intended order safely, so bail out (the
+      // transaction rolls back any DDL that did apply) and let an operator look.
+      if (ddlApplied > 0 && ddlCollided > 0) {
+        throw new Error(
+          `${entry.tag} is partially applied (${ddlApplied} new DDL stmt(s), `
+          + `${ddlCollided} already present). Refusing to guess — this migration `
+          + `was likely edited after deployment; split the new statements into a `
+          + `fresh migration.`,
+        )
+      }
       // Store `when` as created_at to stay byte-compatible with drizzle's own
       // migrator bookkeeping (value is cosmetic for this hash-based runner).
       insert.run(hash, typeof entry.when === 'number' ? entry.when : Date.now())
     })
     apply()
-    appliedCount++
-    console.log(`[noteforge] applied ${entry.tag}`)
+
+    if (ddlApplied === 0 && ddlCollided > 0) {
+      adoptedCount++
+      console.log(`[noteforge] adopted ${entry.tag} (already applied; recorded current hash)`)
+    }
+    else {
+      appliedCount++
+      console.log(`[noteforge] applied ${entry.tag}`)
+    }
   }
 
-  console.log(`[noteforge] migrations up to date (${appliedCount} applied this run, ${entries.length} in journal)`)
+  console.log(
+    `[noteforge] migrations up to date (${appliedCount} applied, ${adoptedCount} adopted this run, `
+    + `${entries.length} in journal)`,
+  )
 }
 catch (err) {
   console.error('[noteforge] migration failed:', err)
