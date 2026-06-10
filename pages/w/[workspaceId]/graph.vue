@@ -106,8 +106,8 @@ const showTagEdges = ref(true)
 const showSimilarEdges = ref(true)
 // Edge thresholds: similar edges below this cosine % and tag edges below this
 // shared-tag count are hidden (visual filter only — layout is unchanged).
-const minSimilarPct = ref(78)
-const minSharedTags = ref(1)
+const minSimilarPct = ref(86)
+const minSharedTags = ref(4)
 
 const allTags = computed<string[]>(() => {
   const s = new Set<string>()
@@ -263,10 +263,15 @@ function buildSim() {
     .map(e => ({ source: e.source, target: e.target, kind: e.kind, weight: e.weight }))
 
   degreeById = new Map<number, number>()
+  let maxTag = 1
   for (const l of simLinks) {
     degreeById.set(endId(l.source), (degreeById.get(endId(l.source)) ?? 0) + 1)
     degreeById.set(endId(l.target), (degreeById.get(endId(l.target)) ?? 0) + 1)
+    if (l.kind === 'tag') maxTag = Math.max(maxTag, l.weight ?? 1)
   }
+  // Don't let the default (4) hide every tag edge in a workspace whose richest
+  // pair shares fewer tags — clamp down to what's actually present.
+  if (minSharedTags.value > maxTag) minSharedTags.value = maxTag
 
   // Gentle per-group anchors arranged on a ring → folders drift into regions
   // without overriding the link/charge layout.
@@ -365,22 +370,31 @@ function draw() {
     const dim = !(lit(a.id) && lit(b.id)) && !onSel
     if (l.kind === 'link') {
       // Markdown links are binary (no weight) — fixed weight.
-      ctx.strokeStyle = onSel ? '#f59e0b' : withAlpha('#d97706', dim ? 0.1 : 0.8)
-      ctx.lineWidth = onSel ? 2.2 : 1.6
+      ctx.strokeStyle = onSel ? '#f59e0b' : withAlpha('#d97706', dim ? 0.1 : 0.85)
+      ctx.lineWidth = onSel ? 2.6 : 2
       ctx.setLineDash([])
     }
     else if (l.kind === 'similar') {
-      // Width + opacity scale with cosine (0.78 floor → 1.0).
-      const t = Math.max(0, Math.min(1, ((l.weight ?? 0.78) - 0.78) / 0.22))
-      ctx.strokeStyle = onSel ? '#34d399' : withAlpha('#10b981', dim ? 0.08 : 0.3 + t * 0.5)
-      ctx.lineWidth = onSel ? 2.6 : 0.8 + t * 2.4
+      // Proximity → red (weak) through to green (strong): hue 8°→140°.
+      // Width + opacity climb too. Cosine spread over [0.80, 0.96] so the
+      // typically narrow band still uses the whole scale.
+      const t = Math.max(0, Math.min(1, ((l.weight ?? 0.8) - 0.80) / 0.16))
+      const hue = 8 + t * 132
+      if (onSel) {
+        ctx.strokeStyle = `hsl(${hue}, 85%, ${dark ? 62 : 46}%)`
+        ctx.lineWidth = 3.6
+      }
+      else {
+        ctx.strokeStyle = `hsla(${hue}, 78%, ${dark ? 58 : 42}%, ${dim ? 0.1 : 0.55 + t * 0.4})`
+        ctx.lineWidth = 1 + t * 5
+      }
       ctx.setLineDash([])
     }
     else {
       // Width scales with shared-tag count.
       const count = l.weight ?? 1
-      ctx.strokeStyle = onSel ? '#c084fc' : withAlpha('#a855f7', dim ? 0.07 : 0.42)
-      ctx.lineWidth = onSel ? 2 : Math.min(3, 0.7 + (count - 1) * 0.6)
+      ctx.strokeStyle = onSel ? '#c084fc' : withAlpha('#a855f7', dim ? 0.07 : 0.45)
+      ctx.lineWidth = onSel ? 2.6 : Math.min(4, 1 + (count - 1) * 0.7)
       ctx.setLineDash([3, 3])
     }
     ctx.beginPath()
@@ -794,7 +808,10 @@ html.dark .legend { border-top-color: theme('colors.ink.800' / 50%); }
   @apply inline-block w-5 h-0.5 rounded-full;
 }
 .legend-line--link { background: rgba(217, 119, 6, 0.85); height: 2px; }
-.legend-line--similar { background: rgba(16, 185, 129, 0.85); height: 2px; }
+.legend-line--similar {
+  background: linear-gradient(to right, hsl(8 78% 50%), hsl(74 78% 45%), hsl(140 78% 40%));
+  height: 2px;
+}
 .legend-line--tag {
   background: linear-gradient(to right, rgba(168, 85, 247, 0.7) 50%, transparent 50%);
   background-size: 6px 100%;
