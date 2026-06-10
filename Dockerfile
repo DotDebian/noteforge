@@ -11,10 +11,10 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Install deps first so layer cache survives source-only edits.
-# .npmrc carries the `public-hoist-pattern[]=sqlite-vec-*` rule that lifts the
-# platform binary (sqlite-vec-linux-x64) to /app/node_modules/, where Nitro's
-# bundled sqlite-vec wrapper can reach it via Node's parent-directory walk.
+# Install deps first so layer cache survives source-only edits. (.npmrc carries
+# the `public-hoist-pattern[]=sqlite-vec-*` rule; the sqlite-vec native binary
+# is also explicitly injected into the Nitro bundle after `pnpm build` below —
+# see that step for why the hoist alone isn't enough.)
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 RUN pnpm install --frozen-lockfile
 
@@ -22,6 +22,22 @@ COPY . .
 
 # Nuxt build → .output/ (bundled Nitro server + client assets).
 RUN pnpm build
+
+# sqlite-vec resolves its native binary at runtime via
+# `import.meta.resolve('sqlite-vec-<os>-<arch>/vec0.<ext>')`. Nitro's NFT trace
+# can't follow that dynamic resolve, so the wrapper copied into
+# .output/server/node_modules/sqlite-vec/ ships WITHOUT the binary next to it —
+# at runtime the resolve throws ERR_MODULE_NOT_FOUND and vector search silently
+# falls back to JS cosine. Inject the linux-x64 platform package next to the
+# bundled wrapper so the very first resolve lookup hits it. `set -eux` + the
+# `test -f` asserts make the build fail loudly if the package is missing (e.g.
+# built on a non-amd64 host) instead of degrading silently in production.
+RUN set -eux; \
+    BIN="$(node -e "const fs=require('fs'),p=require('path');const b='node_modules/.pnpm';const d=fs.readdirSync(b).find(x=>x.startsWith('sqlite-vec-linux-x64@'));if(!d){console.error('sqlite-vec-linux-x64 not installed');process.exit(1)}process.stdout.write(p.join(b,d,'node_modules','sqlite-vec-linux-x64'))")"; \
+    test -f "$BIN/vec0.so"; \
+    mkdir -p .output/server/node_modules/sqlite-vec/node_modules; \
+    cp -RL "$BIN" .output/server/node_modules/sqlite-vec/node_modules/sqlite-vec-linux-x64; \
+    test -f .output/server/node_modules/sqlite-vec/node_modules/sqlite-vec-linux-x64/vec0.so
 
 # --- Runtime stage -------------------------------------------------------- #
 # Slim image with just curl (for the HTTP healthcheck) and the bits needed
