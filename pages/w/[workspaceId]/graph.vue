@@ -354,10 +354,14 @@ function drawRadialLink(ctx: CanvasRenderingContext2D, from: TNode, to: TNode) {
 }
 
 function drawChord(ctx: CanvasRenderingContext2D, a: TNode, b: TNode) {
-  // Bow toward the centre (origin) so chords bundle inward and clear the rim.
-  const t = 0.55
-  const cx = ((a.x + b.x) / 2) * (1 - t)
-  const cy = ((a.y + b.y) / 2) * (1 - t)
+  // Hierarchical-ish bundling: bow through the midpoint of the two docs' parent
+  // folders (pulled slightly inward), NOT the dead centre. Same-folder edges
+  // share a parent so they bundle tightly toward that folder's junction; only
+  // cross-folder edges dip deep — keeps the middle from becoming a knot.
+  const pa = a.parent ?? a
+  const pb = b.parent ?? b
+  const cx = ((pa.x + pb.x) / 2) * 0.85
+  const cy = ((pa.y + pb.y) / 2) * 0.85
   ctx.beginPath()
   ctx.moveTo(a.x, a.y)
   ctx.quadraticCurveTo(cx, cy, b.x, b.y)

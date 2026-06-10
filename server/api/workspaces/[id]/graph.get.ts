@@ -51,6 +51,13 @@ export interface GraphFolder {
 
 /** A tag joining more docs than this is a category, not a relationship — skip it. */
 const TAG_NOISY_MAX = 22
+/**
+ * Hard cap on tag edges kept per document. Even after dropping noisy tags, a
+ * naive C(k,2) clique per shared tag explodes into thousands of edges (an
+ * unreadable hairball). Keep only each doc's strongest few tag neighbours
+ * (ranked by shared-tag count); an edge survives if it's top-K for EITHER end.
+ */
+const TAG_MAX_PER_DOC = 4
 /** Cap the semantic O(n²) pass to mid-size workspaces (each pair is a 1024-dim cosine). */
 const SIMILARITY_MAX_DOCS = 800
 /** Max semantic neighbours kept per node (asymmetric kNN, de-duped to undirected). */
@@ -180,7 +187,24 @@ export default defineEventHandler(async (event) => {
       }
     }
   }
+  // Prune to each doc's top-K tag neighbours so a few broad tags can't blanket
+  // the workspace in edges. An edge is kept if it ranks top-K for EITHER end,
+  // which bounds the total at ~docs × K and keeps the graph connected.
+  const tagCandidatesByDoc = new Map<number, Array<{ key: string, weight: number }>>()
   for (const [key, p] of tagPairs) {
+    if (!tagCandidatesByDoc.has(p.a)) tagCandidatesByDoc.set(p.a, [])
+    if (!tagCandidatesByDoc.has(p.b)) tagCandidatesByDoc.set(p.b, [])
+    tagCandidatesByDoc.get(p.a)!.push({ key, weight: p.weight })
+    tagCandidatesByDoc.get(p.b)!.push({ key, weight: p.weight })
+  }
+  const keptTagKeys = new Set<string>()
+  for (const cands of tagCandidatesByDoc.values()) {
+    cands.sort((x, y) => y.weight - x.weight)
+    for (const c of cands.slice(0, TAG_MAX_PER_DOC)) keptTagKeys.add(c.key)
+  }
+
+  for (const [key, p] of tagPairs) {
+    if (!keptTagKeys.has(key)) continue
     connectedPair.add(key)
     edges.push({ source: p.a, target: p.b, kind: 'tag', tag: p.tag, weight: p.weight })
   }
