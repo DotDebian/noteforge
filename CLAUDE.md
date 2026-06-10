@@ -18,6 +18,8 @@ pnpm db:studio          # Drizzle Studio
 
 Quality gates: `pnpm typecheck` (vue-tsc strict) and `pnpm test` (vitest — covers chunking, vector ops, best-sentence, citations, editor markdown). Run both after non-trivial changes.
 
+⚠️ **Local `data/noteforge.db` is an empty dev scaffold — real data lives on a remote prod VPS** (Docker, `DATABASE_URL=/app/data/noteforge.db` in the container). Inspecting the local SQLite file will show 0 rows for every table, so it does NOT reflect what the user sees in screenshots. Don't validate data-shape assumptions against the local DB; reason from the schema/code, or ask the user to run a query on the VPS. Note also that user content columns are encrypted at rest under the per-user DEK — only embeddings (`summary_embedding`, `embedding_blob`) and the FTS5 mirror are cleartext, so even a prod DB dump can't be read for titles/tags/text without the user's key.
+
 `.env` requires `MISTRAL_API_KEY` and `NUXT_SESSION_PASSWORD` (≥ 32 chars). `pnpm-workspace.yaml` whitelists native builds (`better-sqlite3`, `esbuild`, `@parcel/watcher`) — required by pnpm 9+. Native compile is avoided by pinning `better-sqlite3 ^12.10.0` which ships Node 24 prebuilts.
 
 **Restart vs HMR**: `tailwind.config.ts` and `nuxt.config.ts` changes need a dev server restart. Pinia stores hot-reload because every store calls `acceptHMRUpdate(useFooStore, import.meta.hot)` at the bottom — keep that hook when adding new stores.
