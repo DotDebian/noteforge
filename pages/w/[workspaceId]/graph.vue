@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useTheme } from '~/composables/useTheme'
 import { useWorkspacesStore } from '~/stores/workspaces'
 
 interface GraphNode {
@@ -15,7 +16,12 @@ interface GraphEdge {
   tag?: string
   weight?: number
 }
-interface GraphResponse { nodes: GraphNode[], edges: GraphEdge[] }
+interface GraphFolder {
+  id: number
+  name: string
+  parentId: number | null
+}
+interface GraphResponse { nodes: GraphNode[], edges: GraphEdge[], folders: GraphFolder[] }
 
 const L = {
   title: 'Vue graphe',
@@ -27,7 +33,6 @@ const L = {
   zoomIn: 'Zoom +',
   zoomOut: 'Zoom -',
   reset: 'Recentrer',
-  restart: 'Relancer la simulation',
   isolate: 'Isoler le nœud sélectionné',
   unisolate: 'Annuler l\'isolement',
   legendLinks: 'Liens markdown',
@@ -36,7 +41,9 @@ const L = {
   showTags: 'Afficher les tags partagés',
   showSimilar: 'Afficher les notes similaires',
   selected: 'Sélectionné :',
-  stats: (n: number, e: number) => `${n} notes · ${e} arêtes`,
+  rootGroup: 'Racine',
+  untitled: 'Sans titre',
+  stats: (n: number, e: number) => `${n} notes · ${e} liens`,
 }
 
 useHead(() => ({ title: `${L.title} — NoteForge` }))
@@ -44,6 +51,7 @@ useHead(() => ({ title: `${L.title} — NoteForge` }))
 const route = useRoute()
 const router = useRouter()
 const workspacesStore = useWorkspacesStore()
+const { isDark } = useTheme()
 const workspaceId = computed(() => Number(route.params.workspaceId))
 
 const { data, pending } = await useFetch<GraphResponse>(
@@ -53,15 +61,24 @@ const { data, pending } = await useFetch<GraphResponse>(
 
 const nodes = computed<GraphNode[]>(() => data.value?.nodes ?? [])
 const edges = computed<GraphEdge[]>(() => data.value?.edges ?? [])
+const graphFolders = computed<GraphFolder[]>(() => data.value?.folders ?? [])
 
-/* ---------- Tag → color mapping ---------- */
-// 12 visually distinct hues, cycled. "untagged" is gray.
-const PALETTE = [
-  '#b54a18', '#0ea5e9', '#9333ea', '#16a34a',
-  '#dc2626', '#0891b2', '#d97706', '#7c3aed',
-  '#059669', '#db2777', '#2563eb', '#65a30d',
+/* ---------- Colour palette (by top-level folder, NOT by tag) ----------
+   A handful of harmonious hues — one per top-level folder, cycled. Root-level
+   docs (no folder) get a neutral slate. This is deliberately few colours: the
+   old per-tag colouring cycled 280+ tags through 12 hues and meant nothing. */
+const FOLDER_PALETTE = [
+  '#e0792b', '#3b82f6', '#10b981', '#a855f7',
+  '#ec4899', '#eab308', '#14b8a6', '#f97316',
 ]
-const UNTAGGED = '#9ca3af'
+const ROOT_COLOR = '#94a3b8'
+
+/* ---------- Controls / filters ---------- */
+const filterTag = ref<string>('')
+const selectedNodeId = ref<number | null>(null)
+const isolated = ref(false)
+const showTagEdges = ref(true)
+const showSimilarEdges = ref(true)
 
 const allTags = computed<string[]>(() => {
   const s = new Set<string>()
@@ -69,66 +86,198 @@ const allTags = computed<string[]>(() => {
   return Array.from(s).sort()
 })
 
-const tagColor = computed<Map<string, string>>(() => {
-  const m = new Map<string, string>()
-  allTags.value.forEach((t, i) => m.set(t, PALETTE[i % PALETTE.length]!))
-  return m
-})
-
-function colorForNode(n: GraphNode): string {
-  const first = n.tags[0]
-  if (!first) return UNTAGGED
-  return tagColor.value.get(first) ?? UNTAGGED
+/* ---------- Radial-tree layout ----------
+   A radial dendrogram: virtual workspace root at the centre, folders branch
+   outward ring-by-ring (depth = ring), every document sits as a leaf on the
+   outer rim. Deterministic — no physics, no jitter. Folders with no documents
+   anywhere below them are pruned so empty branches don't waste angular space. */
+interface TNode {
+  key: string
+  kind: 'root' | 'folder' | 'doc'
+  id: number
+  parent: TNode | null
+  children: TNode[]
+  depth: number
+  group: string // top-level group key for colour: 'root' | `f${topFolderId}`
+  leafStart: number
+  leafEnd: number
+  angle: number
+  radius: number
+  x: number
+  y: number
+  title: string
 }
 
-/* ---------- Filters ---------- */
-const filterTag = ref<string>('')
-const selectedNodeId = ref<number | null>(null)
-const isolated = ref(false)
-// Edge-kind visibility. `link` edges are always shown (explicit, authored);
-// tag + similarity edges are inferred and can be toggled off to declutter.
-const showTagEdges = ref(true)
-const showSimilarEdges = ref(true)
+interface Layout {
+  branches: Array<{ from: TNode, to: TNode }>
+  docPos: Map<number, TNode>
+  folderNodes: TNode[]
+  root: TNode
+  rOuter: number
+  colorByGroup: Map<string, string>
+  groups: Array<{ key: string, label: string, color: string }>
+}
 
-const filteredNodeIds = computed<Set<number>>(() => {
-  if (!filterTag.value && (!isolated.value || selectedNodeId.value == null)) {
-    return new Set(nodes.value.map(n => n.id))
+function polar(angle: number, radius: number) {
+  return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius }
+}
+
+function buildLayout(ns: GraphNode[], fs: GraphFolder[]): Layout {
+  const root: TNode = {
+    key: 'root', kind: 'root', id: -1, parent: null, children: [], depth: 0,
+    group: 'root', leafStart: 0, leafEnd: 0, angle: 0, radius: 0, x: 0, y: 0, title: '',
   }
-  const out = new Set<number>()
-  if (filterTag.value) {
-    for (const n of nodes.value) {
-      if (n.tags.includes(filterTag.value)) out.add(n.id)
+  const byKey = new Map<string, TNode>([['root', root]])
+  const folderIds = new Set(fs.map(f => f.id))
+  const folderName = new Map(fs.map(f => [f.id, f.name] as const))
+
+  for (const f of fs) {
+    byKey.set(`f${f.id}`, {
+      key: `f${f.id}`, kind: 'folder', id: f.id, parent: null, children: [], depth: 0,
+      group: '', leafStart: 0, leafEnd: 0, angle: 0, radius: 0, x: 0, y: 0, title: f.name,
+    })
+  }
+  for (const f of fs) {
+    const node = byKey.get(`f${f.id}`)!
+    const pKey = f.parentId != null && folderIds.has(f.parentId) ? `f${f.parentId}` : 'root'
+    const parent = byKey.get(pKey) ?? root
+    node.parent = parent
+    parent.children.push(node)
+  }
+  for (const n of ns) {
+    const node: TNode = {
+      key: `d${n.id}`, kind: 'doc', id: n.id, parent: null, children: [], depth: 0,
+      group: '', leafStart: 0, leafEnd: 0, angle: 0, radius: 0, x: 0, y: 0, title: n.title,
+    }
+    byKey.set(node.key, node)
+    const pKey = n.folderId != null && folderIds.has(n.folderId) ? `f${n.folderId}` : 'root'
+    const parent = byKey.get(pKey) ?? root
+    node.parent = parent
+    parent.children.push(node)
+  }
+
+  // Prune folder subtrees that contain no document.
+  function docCount(node: TNode): number {
+    if (node.kind === 'doc') return 1
+    let c = 0
+    for (const ch of node.children) c += docCount(ch)
+    return c
+  }
+  function prune(node: TNode) {
+    node.children = node.children.filter(ch => ch.kind !== 'folder' || docCount(ch) > 0)
+    for (const ch of node.children) prune(ch)
+  }
+  prune(root)
+
+  // Stable, pleasant order: folders before docs, then alphabetical.
+  function sortChildren(node: TNode) {
+    node.children.sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === 'folder' ? -1 : 1
+      return a.title.localeCompare(b.title)
+    })
+    for (const ch of node.children) sortChildren(ch)
+  }
+  sortChildren(root)
+
+  // Depth + colour group (the depth-1 ancestor decides the colour).
+  function assign(node: TNode, depth: number, group: string) {
+    node.depth = depth
+    node.group = node.kind === 'root' ? 'root' : group
+    for (const ch of node.children) {
+      const childGroup = node.kind === 'root'
+        ? (ch.kind === 'folder' ? `f${ch.id}` : 'root')
+        : group
+      assign(ch, depth + 1, childGroup)
     }
   }
-  else {
-    for (const n of nodes.value) out.add(n.id)
-  }
-  if (isolated.value && selectedNodeId.value != null) {
-    const keep = new Set<number>([selectedNodeId.value])
-    for (const e of edges.value) {
-      if (e.source === selectedNodeId.value) keep.add(e.target)
-      else if (e.target === selectedNodeId.value) keep.add(e.source)
-    }
-    // Intersect.
-    for (const id of out) if (!keep.has(id)) out.delete(id)
-    if (out.size === 0) for (const id of keep) out.add(id)
-  }
-  return out
-})
+  assign(root, 0, 'root')
 
-const filteredEdges = computed<GraphEdge[]>(() => {
-  const ok = filteredNodeIds.value
+  // Leaf indices via pre-order DFS; internal nodes get the centre of their span.
+  let leafIdx = 0
+  const allNodes: TNode[] = []
+  function dfs(node: TNode) {
+    allNodes.push(node)
+    if (node.children.length === 0) {
+      node.leafStart = node.leafEnd = leafIdx++
+      return
+    }
+    let first = Number.POSITIVE_INFINITY
+    let last = Number.NEGATIVE_INFINITY
+    for (const ch of node.children) {
+      dfs(ch)
+      first = Math.min(first, ch.leafStart)
+      last = Math.max(last, ch.leafEnd)
+    }
+    node.leafStart = first
+    node.leafEnd = last
+  }
+  dfs(root)
+  const numLeaves = Math.max(1, leafIdx)
+
+  let maxFolderDepth = 0
+  for (const n of allNodes) if (n.kind === 'folder') maxFolderDepth = Math.max(maxFolderDepth, n.depth)
+  const ringDenom = maxFolderDepth + 1
+  // Enough circumference for the leaves to breathe; pan/zoom handles the rest.
+  const rOuter = Math.min(900, Math.max(200, numLeaves * 3.6))
+
+  for (const n of allNodes) {
+    n.angle = ((n.leafStart + n.leafEnd + 1) / 2 / numLeaves) * Math.PI * 2 - Math.PI / 2
+    if (n.kind === 'root') n.radius = 0
+    else if (n.kind === 'doc') n.radius = rOuter
+    else n.radius = (rOuter * n.depth) / ringDenom
+    const p = polar(n.angle, n.radius)
+    n.x = p.x
+    n.y = p.y
+  }
+
+  const branches = allNodes.filter(n => n.parent).map(n => ({ from: n.parent!, to: n }))
+  const docPos = new Map<number, TNode>()
+  const folderNodes: TNode[] = []
+  for (const n of allNodes) {
+    if (n.kind === 'doc') docPos.set(n.id, n)
+    else if (n.kind === 'folder') folderNodes.push(n)
+  }
+
+  // Colours: one per top-level group, in tree order.
+  const groupKeys: string[] = []
+  const seen = new Set<string>()
+  for (const n of allNodes) {
+    if (n.group && !seen.has(n.group)) {
+      seen.add(n.group)
+      groupKeys.push(n.group)
+    }
+  }
+  const colorByGroup = new Map<string, string>([['root', ROOT_COLOR]])
+  let pi = 0
+  for (const g of groupKeys) {
+    if (g === 'root') continue
+    colorByGroup.set(g, FOLDER_PALETTE[pi % FOLDER_PALETTE.length]!)
+    pi++
+  }
+  const groups = groupKeys.map(g => ({
+    key: g,
+    label: g === 'root' ? L.rootGroup : (folderName.get(Number(g.slice(1))) || '—'),
+    color: colorByGroup.get(g) ?? ROOT_COLOR,
+  }))
+
+  return { branches, docPos, folderNodes, root, rOuter, colorByGroup, groups }
+}
+
+const layout = computed<Layout>(() => buildLayout(nodes.value, graphFolders.value))
+
+/* ---------- Relationship edges (drawn as chords over the tree) ---------- */
+const relEdges = computed<GraphEdge[]>(() => {
+  const pos = layout.value.docPos
   return edges.value.filter((e) => {
     if (e.kind === 'tag' && !showTagEdges.value) return false
     if (e.kind === 'similar' && !showSimilarEdges.value) return false
-    return ok.has(e.source) && ok.has(e.target)
+    return pos.has(e.source) && pos.has(e.target)
   })
 })
 
-/* ---------- Node degree (drives radius — more connected = bigger) ---------- */
 const degreeById = computed<Map<number, number>>(() => {
   const m = new Map<number, number>()
-  for (const e of filteredEdges.value) {
+  for (const e of relEdges.value) {
     m.set(e.source, (m.get(e.source) ?? 0) + 1)
     m.set(e.target, (m.get(e.target) ?? 0) + 1)
   }
@@ -137,167 +286,82 @@ const degreeById = computed<Map<number, number>>(() => {
 
 function radiusForId(id: number): number {
   const deg = degreeById.value.get(id) ?? 0
-  // 5px base, growing with sqrt(degree), capped so hubs don't dominate.
-  return Math.min(12, 5 + Math.sqrt(deg) * 1.7)
+  return Math.min(11, 4.5 + Math.sqrt(deg) * 1.5)
 }
 
-/* ---------- Canvas + simulation ---------- */
-interface Sim {
-  id: number
-  x: number
-  y: number
-  vx: number
-  vy: number
-  r: number
-}
+// Doc ids to keep lit; `null` means everything is lit (no filter / isolate).
+const highlightIds = computed<Set<number> | null>(() => {
+  const hasFilter = !!filterTag.value
+  const hasIsolate = isolated.value && selectedNodeId.value != null
+  if (!hasFilter && !hasIsolate) return null
 
+  let set: Set<number> | null = null
+  if (hasFilter) {
+    set = new Set(nodes.value.filter(n => n.tags.includes(filterTag.value)).map(n => n.id))
+  }
+  if (hasIsolate) {
+    const keep = new Set<number>([selectedNodeId.value!])
+    for (const e of relEdges.value) {
+      if (e.source === selectedNodeId.value) keep.add(e.target)
+      else if (e.target === selectedNodeId.value) keep.add(e.source)
+    }
+    if (set) {
+      for (const id of Array.from(set)) if (!keep.has(id)) set.delete(id)
+    }
+    else { set = keep }
+  }
+  return set
+})
+
+/* ---------- Canvas + view transform ---------- */
 const canvasEl = ref<HTMLCanvasElement | null>(null)
 const containerEl = ref<HTMLDivElement | null>(null)
-const sims = ref<Map<number, Sim>>(new Map())
 const zoom = ref(1)
 const offsetX = ref(0)
 const offsetY = ref(0)
 const hoverId = ref<number | null>(null)
 
-let rafId: number | null = null
 let resizeObserver: ResizeObserver | null = null
-let lastTickAt = 0
 
-function ensureSims() {
-  const present = new Set<number>()
-  const w = containerEl.value?.clientWidth ?? 800
-  const h = containerEl.value?.clientHeight ?? 600
-  const cx = w / 2
-  const cy = h / 2
-  const r0 = Math.min(w, h) * 0.35
-  for (const n of nodes.value) {
-    present.add(n.id)
-    if (!sims.value.has(n.id)) {
-      const angle = (Math.random() * Math.PI * 2)
-      const dist = r0 * (0.4 + Math.random() * 0.6)
-      sims.value.set(n.id, {
-        id: n.id,
-        x: cx + Math.cos(angle) * dist,
-        y: cy + Math.sin(angle) * dist,
-        vx: 0,
-        vy: 0,
-        r: 6,
-      })
-    }
-  }
-  // Drop stale sims for removed nodes.
-  for (const id of Array.from(sims.value.keys())) {
-    if (!present.has(id)) sims.value.delete(id)
-  }
+function withAlpha(hex: string, a: number): string {
+  const h = hex.replace('#', '')
+  const r = parseInt(h.slice(0, 2), 16)
+  const g = parseInt(h.slice(2, 4), 16)
+  const b = parseInt(h.slice(4, 6), 16)
+  return `rgba(${r}, ${g}, ${b}, ${a})`
 }
 
-/* ---------- Simulation step ----------
-   Forces:
-     - Repulsion: O(n²) Coulomb-like between every visible pair.
-     - Attraction: spring along visible edges (link edges 2× stronger).
-     - Gravity to canvas center.
-   Cools via a decaying `alpha` (see below) so the layout always settles. */
+function fitView() {
+  const c = containerEl.value
+  if (!c) return
+  const w = c.clientWidth
+  const h = c.clientHeight
+  const span = layout.value.rOuter * 2 + 80 // node radius + label headroom
+  zoom.value = Math.max(0.2, Math.min(2.5, Math.min(w, h) / span))
+  offsetX.value = w / 2
+  offsetY.value = h / 2
+}
 
-const MAX_VEL = 20
-const REPULSION = 1500
-const SPRING_LINK = 0.025
-const SPRING_SIMILAR = 0.02
-const SPRING_TAG = 0.012
-const SPRING_REST = 80
-const GRAVITY = 0.012
-const DAMP = 0.85
-// Cooling (d3-force style): every force is scaled by `alpha`, which decays
-// toward 0 each tick. This is what guarantees the layout settles — without it a
-// densely-connected graph (e.g. hundreds of shared-tag edges, all wanting the
-// same SPRING_REST) stays geometrically frustrated and oscillates at clamp
-// velocity until the hard time cap. With cooling, motion decays smoothly to
-// rest in ~3s regardless of edge density.
-const ALPHA_DECAY = 0.025
-const ALPHA_MIN = 0.01
+function drawRadialLink(ctx: CanvasRenderingContext2D, from: TNode, to: TNode) {
+  // Classic dendrogram bow: control points share the midpoint radius.
+  const rm = (from.radius + to.radius) / 2
+  const c1 = polar(from.angle, rm)
+  const c2 = polar(to.angle, rm)
+  ctx.beginPath()
+  ctx.moveTo(from.x, from.y)
+  ctx.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, to.x, to.y)
+  ctx.stroke()
+}
 
-let alpha = 1
-let energyExpiresAt = 0 // hard cap: never sim forever even if something reheats it
-
-function step() {
-  if (!containerEl.value) return
-  const w = containerEl.value.clientWidth
-  const h = containerEl.value.clientHeight
-  const cx = w / 2
-  const cy = h / 2
-
-  const visibleIds = filteredNodeIds.value
-  const visibleSims: Sim[] = []
-  for (const s of sims.value.values()) if (visibleIds.has(s.id)) visibleSims.push(s)
-
-  // Cool the system toward rest — all forces below are scaled by this.
-  alpha += (0 - alpha) * ALPHA_DECAY
-
-  // Repulsion
-  for (let i = 0; i < visibleSims.length; i++) {
-    const a = visibleSims[i]!
-    for (let j = i + 1; j < visibleSims.length; j++) {
-      const b = visibleSims[j]!
-      const dx = b.x - a.x
-      const dy = b.y - a.y
-      let d2 = dx * dx + dy * dy
-      if (d2 < 0.01) d2 = 0.01
-      const d = Math.sqrt(d2)
-      // F = k / d²; spread over distance for direction.
-      const f = REPULSION / d2
-      const fx = (dx / d) * f * alpha
-      const fy = (dy / d) * f * alpha
-      a.vx -= fx
-      a.vy -= fy
-      b.vx += fx
-      b.vy += fy
-    }
-  }
-
-  // Springs
-  for (const e of filteredEdges.value) {
-    const a = sims.value.get(e.source)
-    const b = sims.value.get(e.target)
-    if (!a || !b) continue
-    const dx = b.x - a.x
-    const dy = b.y - a.y
-    const d = Math.sqrt(dx * dx + dy * dy) || 0.01
-    const k = e.kind === 'link'
-      ? SPRING_LINK
-      : e.kind === 'similar'
-        ? SPRING_SIMILAR * (e.weight ?? 0.8)
-        : SPRING_TAG
-    const displ = d - SPRING_REST
-    const fx = (dx / d) * displ * k * alpha
-    const fy = (dy / d) * displ * k * alpha
-    a.vx += fx
-    a.vy += fy
-    b.vx -= fx
-    b.vy -= fy
-  }
-
-  // Gravity + integrate
-  for (const s of visibleSims) {
-    s.vx += (cx - s.x) * GRAVITY * alpha
-    s.vy += (cy - s.y) * GRAVITY * alpha
-    s.vx *= DAMP
-    s.vy *= DAMP
-    // Velocity clamp keeps the sim stable even when nodes start very close.
-    if (s.vx > MAX_VEL) s.vx = MAX_VEL
-    if (s.vx < -MAX_VEL) s.vx = -MAX_VEL
-    if (s.vy > MAX_VEL) s.vy = MAX_VEL
-    if (s.vy < -MAX_VEL) s.vy = -MAX_VEL
-    s.x += s.vx
-    s.y += s.vy
-  }
-
-  draw()
-
-  // Settled once cooled (or the hard cap fires) — freeze the layout.
-  if (alpha < ALPHA_MIN || performance.now() > energyExpiresAt) {
-    rafId = null
-    return
-  }
-  rafId = requestAnimationFrame(step)
+function drawChord(ctx: CanvasRenderingContext2D, a: TNode, b: TNode) {
+  // Bow toward the centre (origin) so chords bundle inward and clear the rim.
+  const t = 0.55
+  const cx = ((a.x + b.x) / 2) * (1 - t)
+  const cy = ((a.y + b.y) / 2) * (1 - t)
+  ctx.beginPath()
+  ctx.moveTo(a.x, a.y)
+  ctx.quadraticCurveTo(cx, cy, b.x, b.y)
+  ctx.stroke()
 }
 
 function draw() {
@@ -318,75 +382,91 @@ function draw() {
   ctx.setTransform(dpr * zoom.value, 0, 0, dpr * zoom.value, dpr * offsetX.value, dpr * offsetY.value)
   ctx.clearRect(-offsetX.value / zoom.value, -offsetY.value / zoom.value, w / zoom.value + 2, h / zoom.value + 2)
 
-  const visible = filteredNodeIds.value
+  const lay = layout.value
+  const hl = highlightIds.value
   const sel = selectedNodeId.value
+  const lit = (id: number) => hl == null || hl.has(id)
+  const dark = isDark.value
 
-  // Edges
-  ctx.lineWidth = 0.6
-  for (const e of filteredEdges.value) {
-    const a = sims.value.get(e.source)
-    const b = sims.value.get(e.target)
+  // 1. Tree branches — the readable skeleton, coloured by folder group.
+  ctx.lineCap = 'round'
+  for (const br of lay.branches) {
+    const color = lay.colorByGroup.get(br.to.group) ?? ROOT_COLOR
+    const litBranch = br.to.kind !== 'doc' || lit(br.to.id)
+    ctx.strokeStyle = withAlpha(color, litBranch ? (dark ? 0.55 : 0.5) : 0.12)
+    ctx.lineWidth = br.to.kind === 'folder' ? 1.6 : 1
+    drawRadialLink(ctx, br.from, br.to)
+  }
+
+  // 2. Relationship chords — the actual insight, on top of the skeleton.
+  for (const e of relEdges.value) {
+    const a = lay.docPos.get(e.source)
+    const b = lay.docPos.get(e.target)
     if (!a || !b) continue
-    if (!visible.has(a.id) || !visible.has(b.id)) continue
-    const highlight = sel != null && (e.source === sel || e.target === sel)
+    const onSel = sel != null && (e.source === sel || e.target === sel)
+    const litEdge = lit(e.source) && lit(e.target)
+    const dim = !litEdge && !onSel
     if (e.kind === 'link') {
-      ctx.strokeStyle = highlight ? '#b54a18' : 'rgba(120, 113, 108, 0.45)'
-      ctx.lineWidth = highlight ? 1.4 : 0.9
+      ctx.strokeStyle = onSel ? '#f59e0b' : withAlpha('#d97706', dim ? 0.1 : 0.7)
+      ctx.lineWidth = onSel ? 2 : 1.4
+      ctx.setLineDash([])
     }
     else if (e.kind === 'similar') {
-      // Semantic similarity — solid emerald, opacity scaled by cosine weight.
-      const w = e.weight ?? 0.8
-      const alpha = highlight ? 0.85 : 0.1 + (w - 0.78) * 1.4
-      ctx.strokeStyle = `rgba(16, 185, 129, ${Math.max(0.1, Math.min(0.6, alpha))})`
-      ctx.lineWidth = highlight ? 1.2 : 0.7
+      const weight = e.weight ?? 0.8
+      const alpha = Math.max(0.28, Math.min(0.8, 0.28 + (weight - 0.78) * 1.8))
+      ctx.strokeStyle = onSel ? '#34d399' : withAlpha('#10b981', dim ? 0.08 : alpha)
+      ctx.lineWidth = onSel ? 1.8 : 1
+      ctx.setLineDash([])
     }
     else {
-      ctx.strokeStyle = highlight ? 'rgba(124, 58, 237, 0.7)' : 'rgba(124, 58, 237, 0.18)'
-      ctx.lineWidth = highlight ? 1.1 : 0.5
-      ctx.setLineDash([3, 2])
+      ctx.strokeStyle = onSel ? '#c084fc' : withAlpha('#a855f7', dim ? 0.07 : 0.4)
+      ctx.lineWidth = onSel ? 1.5 : 0.8
+      ctx.setLineDash([3, 3])
     }
-    ctx.beginPath()
-    ctx.moveTo(a.x, a.y)
-    ctx.lineTo(b.x, b.y)
-    ctx.stroke()
-    ctx.setLineDash([])
+    drawChord(ctx, a, b)
   }
+  ctx.setLineDash([])
 
-  // Nodes
-  const nodeById = new Map(nodes.value.map(n => [n.id, n] as const))
-  for (const s of sims.value.values()) {
-    if (!visible.has(s.id)) continue
-    const node = nodeById.get(s.id)
-    if (!node) continue
-    const isHover = hoverId.value === s.id
-    const isSelected = sel === s.id
-    const base = radiusForId(s.id)
-    const r = isSelected ? base + 3 : isHover ? base + 2 : base
+  // 3. Folder junctions — small muted dots so the structure reads.
+  ctx.fillStyle = dark ? 'rgba(214, 211, 209, 0.5)' : 'rgba(87, 83, 78, 0.55)'
+  for (const f of lay.folderNodes) {
     ctx.beginPath()
-    ctx.arc(s.x, s.y, r, 0, Math.PI * 2)
-    ctx.fillStyle = colorForNode(node)
+    ctx.arc(f.x, f.y, f.depth <= 1 ? 4 : 3, 0, Math.PI * 2)
     ctx.fill()
-    if (isSelected) {
-      ctx.lineWidth = 2.5
-      ctx.strokeStyle = '#1f2937'
+  }
+  // Workspace centre.
+  ctx.fillStyle = dark ? 'rgba(245, 245, 244, 0.85)' : 'rgba(41, 37, 36, 0.8)'
+  ctx.beginPath()
+  ctx.arc(lay.root.x, lay.root.y, 5, 0, Math.PI * 2)
+  ctx.fill()
+
+  // 4. Document nodes.
+  for (const [id, n] of lay.docPos) {
+    const isHover = hoverId.value === id
+    const isSelected = sel === id
+    const base = radiusForId(id)
+    const r = isSelected ? base + 3 : isHover ? base + 2 : base
+    const color = lay.colorByGroup.get(n.group) ?? ROOT_COLOR
+    ctx.globalAlpha = lit(id) ? 1 : 0.18
+    ctx.beginPath()
+    ctx.arc(n.x, n.y, r, 0, Math.PI * 2)
+    ctx.fillStyle = color
+    ctx.fill()
+    if (isSelected || isHover) {
+      ctx.lineWidth = isSelected ? 2.5 : 1.6
+      ctx.strokeStyle = dark ? 'rgba(245,245,244,0.9)' : 'rgba(28,25,23,0.6)'
       ctx.stroke()
     }
-    else if (isHover) {
-      ctx.lineWidth = 1.6
-      ctx.strokeStyle = 'rgba(0,0,0,0.45)'
-      ctx.stroke()
-    }
+    ctx.globalAlpha = 1
   }
 
-  // Hover label
+  // 5. Hover label.
   if (hoverId.value != null) {
-    const s = sims.value.get(hoverId.value)
-    const n = nodeById.get(hoverId.value)
-    if (s && n) {
-      const label = n.title || 'Sans titre'
+    const s = lay.docPos.get(hoverId.value)
+    if (s) {
+      const label = s.title || L.untitled
       ctx.font = '12px "Inter", sans-serif'
-      const metrics = ctx.measureText(label)
-      const lw = metrics.width + 12
+      const lw = ctx.measureText(label).width + 12
       const lh = 22
       const lx = s.x + 12
       const ly = s.y - 28
@@ -398,20 +478,9 @@ function draw() {
   }
 }
 
-function restartSim() {
-  // Reheat: alpha back to 1 so the layout re-settles from the current positions.
-  alpha = 1
-  energyExpiresAt = performance.now() + 8000
-  if (rafId == null) rafId = requestAnimationFrame(step)
-}
-
 function reset() {
-  zoom.value = 1
-  offsetX.value = 0
-  offsetY.value = 0
-  sims.value.clear()
-  ensureSims()
-  restartSim()
+  fitView()
+  draw()
 }
 
 /* ---------- Interaction ---------- */
@@ -420,32 +489,33 @@ function screenToWorld(x: number, y: number) {
 }
 
 function hitTest(x: number, y: number): number | null {
-  // Iterate in reverse — last drawn on top.
-  const arr = Array.from(sims.value.values())
-  for (let i = arr.length - 1; i >= 0; i--) {
-    const s = arr[i]!
-    if (!filteredNodeIds.value.has(s.id)) continue
-    const dx = x - s.x
-    const dy = y - s.y
-    if (dx * dx + dy * dy <= (radiusForId(s.id) + 4) ** 2) return s.id
+  let best: number | null = null
+  let bestD = Number.POSITIVE_INFINITY
+  for (const [id, n] of layout.value.docPos) {
+    const dx = x - n.x
+    const dy = y - n.y
+    const d2 = dx * dx + dy * dy
+    const rr = (radiusForId(id) + 4) ** 2
+    if (d2 <= rr && d2 < bestD) {
+      bestD = d2
+      best = id
+    }
   }
-  return null
+  return best
 }
 
 let isPanning = false
 let panStart = { x: 0, y: 0, ox: 0, oy: 0 }
-let dragNodeId: number | null = null
 
+// Single click selects (highlight + isolate); double-click opens the document.
 function onMouseDown(e: MouseEvent) {
   if (!canvasEl.value) return
   const rect = canvasEl.value.getBoundingClientRect()
-  const sx = e.clientX - rect.left
-  const sy = e.clientY - rect.top
-  const w = screenToWorld(sx, sy)
-  const id = hitTest(w.x, w.y)
+  const wld = screenToWorld(e.clientX - rect.left, e.clientY - rect.top)
+  const id = hitTest(wld.x, wld.y)
   if (id != null) {
-    dragNodeId = id
     selectedNodeId.value = id
+    draw()
   }
   else {
     isPanning = true
@@ -456,58 +526,37 @@ function onMouseDown(e: MouseEvent) {
 function onMouseMove(e: MouseEvent) {
   if (!canvasEl.value) return
   const rect = canvasEl.value.getBoundingClientRect()
-  const sx = e.clientX - rect.left
-  const sy = e.clientY - rect.top
-  const w = screenToWorld(sx, sy)
+  const wld = screenToWorld(e.clientX - rect.left, e.clientY - rect.top)
 
-  if (dragNodeId != null) {
-    const s = sims.value.get(dragNodeId)
-    if (s) {
-      s.x = w.x
-      s.y = w.y
-      s.vx = 0
-      s.vy = 0
-      restartSim()
-    }
-  }
-  else if (isPanning) {
+  if (isPanning) {
     offsetX.value = panStart.ox + (e.clientX - panStart.x)
     offsetY.value = panStart.oy + (e.clientY - panStart.y)
     draw()
+    return
   }
-  else {
-    const id = hitTest(w.x, w.y)
-    if (id !== hoverId.value) {
-      hoverId.value = id
-      draw()
-    }
+  const id = hitTest(wld.x, wld.y)
+  if (id !== hoverId.value) {
+    hoverId.value = id
+    draw()
   }
 }
 
 function onMouseUp() {
-  dragNodeId = null
   isPanning = false
 }
 
-function onClick(e: MouseEvent) {
+function onDblClick(e: MouseEvent) {
   if (!canvasEl.value) return
-  // If we just panned, don't fire as click.
-  if (isPanning || dragNodeId != null) return
   const rect = canvasEl.value.getBoundingClientRect()
-  const sx = e.clientX - rect.left
-  const sy = e.clientY - rect.top
-  const w = screenToWorld(sx, sy)
-  const id = hitTest(w.x, w.y)
-  if (id != null) {
-    void router.push(`/w/${workspaceId.value}/d/${id}`)
-  }
+  const wld = screenToWorld(e.clientX - rect.left, e.clientY - rect.top)
+  const id = hitTest(wld.x, wld.y)
+  if (id != null) void router.push(`/w/${workspaceId.value}/d/${id}`)
 }
 
 function onWheel(e: WheelEvent) {
   e.preventDefault()
   const factor = e.deltaY > 0 ? 0.9 : 1.1
   const newZoom = Math.max(0.2, Math.min(4, zoom.value * factor))
-  // Zoom toward cursor.
   if (canvasEl.value) {
     const rect = canvasEl.value.getBoundingClientRect()
     const mx = e.clientX - rect.left
@@ -522,14 +571,13 @@ function onWheel(e: WheelEvent) {
 function zoomIn() { zoom.value = Math.min(4, zoom.value * 1.2); draw() }
 function zoomOut() { zoom.value = Math.max(0.2, zoom.value / 1.2); draw() }
 
-watch([nodes, edges, filterTag, isolated, showTagEdges, showSimilarEdges], () => {
-  ensureSims()
-  restartSim()
-})
+// Data change → re-fit + redraw. View / filter change → redraw only.
+watch([() => nodes.value.length, () => graphFolders.value.length], () => { fitView(); draw() })
+watch([filterTag, isolated, showTagEdges, showSimilarEdges, isDark], () => draw())
 
 onMounted(() => {
-  ensureSims()
-  restartSim()
+  fitView()
+  draw()
   if (containerEl.value) {
     resizeObserver = new ResizeObserver(() => draw())
     resizeObserver.observe(containerEl.value)
@@ -537,7 +585,6 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  if (rafId != null) cancelAnimationFrame(rafId)
   if (resizeObserver) resizeObserver.disconnect()
 })
 
@@ -557,7 +604,7 @@ const wsName = computed(() => workspacesStore.current?.name ?? 'Workspace')
         <span class="crumb-sep" aria-hidden="true">/</span>
         <span class="crumb crumb--current">{{ L.title }}</span>
       </div>
-      <span class="graph-stats">{{ L.stats(filteredNodeIds.size, filteredEdges.length) }}</span>
+      <span class="graph-stats">{{ L.stats(nodes.length, relEdges.length) }}</span>
     </header>
 
     <div class="graph-body">
@@ -568,7 +615,7 @@ const wsName = computed(() => workspacesStore.current?.name ?? 'Workspace')
           @mousemove="onMouseMove"
           @mouseup="onMouseUp"
           @mouseleave="onMouseUp"
-          @click="onClick"
+          @dblclick="onDblClick"
           @wheel="onWheel"
         />
         <div v-if="pending && nodes.length === 0" class="overlay">{{ L.loading }}</div>
@@ -591,9 +638,8 @@ const wsName = computed(() => workspacesStore.current?.name ?? 'Workspace')
           <button type="button" class="ghost-btn" @click="zoomOut">{{ L.zoomOut }}</button>
         </div>
 
-        <div class="control control--row">
+        <div class="control">
           <button type="button" class="ghost-btn" @click="reset">{{ L.reset }}</button>
-          <button type="button" class="ghost-btn" @click="restartSim">{{ L.restart }}</button>
         </div>
 
         <div v-if="selectedNode" class="control">
@@ -602,7 +648,7 @@ const wsName = computed(() => workspacesStore.current?.name ?? 'Workspace')
             :to="`/w/${workspaceId}/d/${selectedNode.id}`"
             class="selected-link"
           >
-            {{ selectedNode.title || 'Sans titre' }}
+            {{ selectedNode.title || L.untitled }}
           </NuxtLink>
           <button
             type="button"
@@ -627,12 +673,11 @@ const wsName = computed(() => workspacesStore.current?.name ?? 'Workspace')
           </label>
         </div>
 
-        <div v-if="allTags.length > 0" class="legend">
-          <div v-for="tag in allTags.slice(0, 12)" :key="tag" class="legend-row">
-            <span class="legend-dot" :style="{ background: tagColor.get(tag) }" />
-            <span>{{ tag }}</span>
+        <div v-if="layout.groups.length > 0" class="legend">
+          <div v-for="g in layout.groups" :key="g.key" class="legend-row">
+            <span class="legend-dot" :style="{ background: g.color }" />
+            <span class="legend-folder">{{ g.label }}</span>
           </div>
-          <div v-if="allTags.length > 12" class="legend-more">+{{ allTags.length - 12 }} autres</div>
         </div>
       </aside>
     </div>
@@ -743,11 +788,11 @@ html.dark .legend { border-top-color: theme('colors.ink.800' / 50%); }
 .legend-line {
   @apply inline-block w-5 h-0.5 rounded-full;
 }
-.legend-line--link { background: rgba(120, 113, 108, 0.7); height: 2px; }
-.legend-line--similar { background: rgba(16, 185, 129, 0.7); height: 2px; }
+.legend-line--link { background: rgba(217, 119, 6, 0.8); height: 2px; }
+.legend-line--similar { background: rgba(16, 185, 129, 0.8); height: 2px; }
 .legend-line--tag {
-  background: linear-gradient(to right, rgba(124,58,237,0.45) 50%, transparent 50%);
-  background-size: 5px 100%;
+  background: linear-gradient(to right, rgba(168, 85, 247, 0.7) 50%, transparent 50%);
+  background-size: 6px 100%;
   height: 1.5px;
 }
 .legend-toggle {
@@ -760,9 +805,9 @@ html.dark .legend { border-top-color: theme('colors.ink.800' / 50%); }
   flex-shrink: 0;
 }
 .legend-dot {
-  @apply inline-block w-2.5 h-2.5 rounded-full;
+  @apply inline-block w-2.5 h-2.5 rounded-full shrink-0;
 }
-.legend-more {
-  @apply text-[11px] text-ink-400 dark:text-ink-500 italic;
+.legend-folder {
+  @apply truncate;
 }
 </style>

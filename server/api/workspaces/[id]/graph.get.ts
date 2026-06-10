@@ -18,11 +18,11 @@
 import { and, eq, inArray } from 'drizzle-orm'
 import { defineEventHandler } from 'h3'
 import { useDb } from '~/server/database/client'
-import { docAnalyses, docChunks, docLinks, documents } from '~/server/database/schema'
+import { docAnalyses, docChunks, docLinks, documents, folders } from '~/server/database/schema'
 import { assertWorkspaceAccess, parseIdParam } from '~/server/utils/access'
-import { activeDocsWhere } from '~/server/utils/active'
+import { activeDocsWhere, activeFoldersWhere } from '~/server/utils/active'
 import { getDek } from '~/server/utils/dek'
-import { decryptAnalysis, decryptDocument } from '~/server/utils/encrypted-entities'
+import { decryptAnalysis, decryptDocument, decryptFolder } from '~/server/utils/encrypted-entities'
 import { bufferToFloats, cosineSimilarity, loadEmbedding, meanVector } from '~/server/utils/vector'
 
 export interface GraphNode {
@@ -40,6 +40,13 @@ export interface GraphEdge {
   tag?: string
   /** Strength signal: cosine for `similar`, shared-tag count for `tag`. */
   weight?: number
+}
+
+/** Folder hierarchy — drives the radial-tree layout + per-folder colouring. */
+export interface GraphFolder {
+  id: number
+  name: string
+  parentId: number | null
 }
 
 /** A tag joining more docs than this is a category, not a relationship — skip it. */
@@ -66,6 +73,17 @@ export default defineEventHandler(async (event) => {
 
   const db = useDb()
 
+  /* ---------- folder hierarchy (radial-tree skeleton + colour groups) ---------- */
+  const folderRows = await db
+    .select({ id: folders.id, name: folders.name, parentId: folders.parentId })
+    .from(folders)
+    .where(and(eq(folders.workspaceId, workspaceId), activeFoldersWhere()))
+  const graphFolders: GraphFolder[] = folderRows.map(f => ({
+    id: f.id,
+    name: decryptFolder({ name: f.name }, dek).name ?? '',
+    parentId: f.parentId,
+  }))
+
   /* ---------- nodes ---------- */
   const docs = await db
     .select({
@@ -77,7 +95,7 @@ export default defineEventHandler(async (event) => {
     .where(and(eq(documents.workspaceId, workspaceId), activeDocsWhere()))
 
   if (docs.length === 0) {
-    return { nodes: [] as GraphNode[], edges: [] as GraphEdge[] }
+    return { nodes: [] as GraphNode[], edges: [] as GraphEdge[], folders: graphFolders }
   }
 
   const docIds = docs.map(d => d.id)
@@ -214,5 +232,5 @@ export default defineEventHandler(async (event) => {
     }
   }
 
-  return { nodes, edges }
+  return { nodes, edges, folders: graphFolders }
 })
