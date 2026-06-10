@@ -106,7 +106,7 @@ const showTagEdges = ref(true)
 const showSimilarEdges = ref(true)
 // Edge thresholds: similar edges below this cosine % and tag edges below this
 // shared-tag count are hidden (visual filter only — layout is unchanged).
-const minSimilarPct = ref(86)
+const minSimilarPct = ref(84)
 const minSharedTags = ref(4)
 
 const allTags = computed<string[]>(() => {
@@ -120,6 +120,8 @@ let sim: Simulation<SimNode, SimLink> | null = null
 let simNodes: SimNode[] = []
 let simLinks: SimLink[] = []
 let degreeById = new Map<number, number>()
+// Strongest cosine present — the green/thick end of the similar-edge scale.
+let maxSimWeight = 1
 let fittedOnce = false
 // Bumped whenever the graph is rebuilt, so reactive computeds re-derive.
 const graphVersion = ref(0)
@@ -264,11 +266,14 @@ function buildSim() {
 
   degreeById = new Map<number, number>()
   let maxTag = 1
+  maxSimWeight = 0
   for (const l of simLinks) {
     degreeById.set(endId(l.source), (degreeById.get(endId(l.source)) ?? 0) + 1)
     degreeById.set(endId(l.target), (degreeById.get(endId(l.target)) ?? 0) + 1)
     if (l.kind === 'tag') maxTag = Math.max(maxTag, l.weight ?? 1)
+    else if (l.kind === 'similar') maxSimWeight = Math.max(maxSimWeight, l.weight ?? 0)
   }
+  if (maxSimWeight <= 0) maxSimWeight = 1
   // Don't let the default (4) hide every tag edge in a workspace whose richest
   // pair shares fewer tags — clamp down to what's actually present.
   if (minSharedTags.value > maxTag) minSharedTags.value = maxTag
@@ -376,9 +381,12 @@ function draw() {
     }
     else if (l.kind === 'similar') {
       // Proximity → red (weak) through to green (strong): hue 8°→140°.
-      // Width + opacity climb too. Cosine spread over [0.80, 0.96] so the
-      // typically narrow band still uses the whole scale.
-      const t = Math.max(0, Math.min(1, ((l.weight ?? 0.8) - 0.80) / 0.16))
+      // Width + opacity climb too. Scale spans the current min threshold
+      // (red/thin floor) up to the strongest cosine present (green/thick),
+      // so the whole spectrum is used whatever the slider / dataset.
+      const lo = minSimilarPct.value / 100
+      const hi = Math.max(lo + 0.02, maxSimWeight)
+      const t = Math.max(0, Math.min(1, ((l.weight ?? lo) - lo) / (hi - lo)))
       const hue = 8 + t * 132
       if (onSel) {
         ctx.strokeStyle = `hsl(${hue}, 85%, ${dark ? 62 : 46}%)`
