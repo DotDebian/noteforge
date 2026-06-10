@@ -56,8 +56,8 @@ const L = {
   bulkUntag: 'Tag -',
   bulkExport: 'Exporter ZIP',
   bulkAnalyze: 'Analyser & indexer',
-  analyzeConfirmTitle: (n: number) => `Réanalyser ${n} note${n > 1 ? 's' : ''} ?`,
-  analyzeConfirmBody: 'NoteForge va contacter Mistral pour chaque note sélectionnée (analyse + réindexation). Cela peut prendre plusieurs dizaines de secondes.',
+  analyzeConfirmTitle: 'Réanalyser & réindexer la sélection ?',
+  analyzeConfirmBody: 'NoteForge va contacter Mistral pour chaque note sélectionnée — y compris toutes les notes des dossiers cochés (analyse + réindexation). Cela peut prendre plusieurs dizaines de secondes.',
   analyzeConfirmYes: 'Réanalyser',
   movePromptTitle: 'Déplacer vers…',
   movePromptMessage: 'Entrez l\'ID du dossier ou « racine » pour la racine.',
@@ -68,8 +68,8 @@ const L = {
   tagPromptConfirm: 'Ajouter',
   untagPromptTitle: 'Retirer un tag des notes sélectionnées',
   untagPromptConfirm: 'Retirer',
-  trashConfirmTitle: (n: number) => `Mettre à la corbeille ${n} note${n > 1 ? 's' : ''} ?`,
-  trashConfirmBody: 'Vous pourrez les restaurer depuis la corbeille.',
+  trashConfirmTitle: 'Mettre la sélection à la corbeille ?',
+  trashConfirmBody: 'Les notes sélectionnées (et toutes celles des dossiers cochés) iront à la corbeille. Vous pourrez les restaurer.',
   trashConfirmYes: 'Mettre à la corbeille',
   renameSaved: 'Renommer',
   deleteSaved: 'Supprimer',
@@ -188,6 +188,7 @@ async function onBulkMove() {
       body: {
         action: 'move',
         docIds: [...bulkSelect.selectedDocs],
+        folderIds: [...bulkSelect.selectedFolders],
         folderId,
       },
     })
@@ -201,10 +202,9 @@ async function onBulkMove() {
 }
 
 async function onBulkTrash() {
-  if (!current.value) return
-  const n = bulkSelect.selectedDocs.length
+  if (!current.value || !bulkSelect.hasSelection) return
   const ok = await dialog.confirm({
-    title: L.trashConfirmTitle(n),
+    title: L.trashConfirmTitle,
     message: L.trashConfirmBody,
     confirmLabel: L.trashConfirmYes,
     destructive: true,
@@ -216,6 +216,7 @@ async function onBulkTrash() {
       body: {
         action: 'trash',
         docIds: [...bulkSelect.selectedDocs],
+        folderIds: [...bulkSelect.selectedFolders],
       },
     })
     await treeStore.fetchWorkspaceTree(current.value.id, true)
@@ -239,6 +240,7 @@ async function onBulkTagAdd() {
       body: {
         action: 'tag-add',
         docIds: [...bulkSelect.selectedDocs],
+        folderIds: [...bulkSelect.selectedFolders],
         tag,
       },
     })
@@ -270,6 +272,7 @@ async function onBulkTagRemove() {
       body: {
         action: 'tag-remove',
         docIds: [...bulkSelect.selectedDocs],
+        folderIds: [...bulkSelect.selectedFolders],
         tag,
       },
     })
@@ -281,11 +284,9 @@ async function onBulkTagRemove() {
 }
 
 async function onBulkAnalyze() {
-  if (!current.value) return
-  const n = bulkSelect.docCount
-  if (n === 0) return
+  if (!current.value || !bulkSelect.hasSelection) return
   const ok = await dialog.confirm({
-    title: L.analyzeConfirmTitle(n),
+    title: L.analyzeConfirmTitle,
     message: L.analyzeConfirmBody,
     confirmLabel: L.analyzeConfirmYes,
   })
@@ -296,6 +297,7 @@ async function onBulkAnalyze() {
       body: {
         action: 'analyze',
         docIds: [...bulkSelect.selectedDocs],
+        folderIds: [...bulkSelect.selectedFolders],
       },
     })
     if (res.errors.length > 0) {
@@ -312,7 +314,7 @@ async function onBulkAnalyze() {
 }
 
 async function onBulkExport() {
-  if (bulkSelect.selectedDocs.length === 0) return
+  if (!bulkSelect.hasSelection) return
   // Use a hidden form-style POST so the browser streams the ZIP straight to disk.
   try {
     const res = await fetch('/api/documents/bulk', {
@@ -322,6 +324,7 @@ async function onBulkExport() {
       body: JSON.stringify({
         action: 'export',
         docIds: [...bulkSelect.selectedDocs],
+        folderIds: [...bulkSelect.selectedFolders],
       }),
     })
     if (!res.ok) {
@@ -918,7 +921,7 @@ async function onRootDocDrop(e: DragEvent) {
     <!-- Bulk selection sticky action bar -->
     <div v-if="bulkSelect.isActive && !collapsed" class="bulk-bar">
       <div class="bulk-bar-header">
-        <span class="bulk-count">{{ L.bulkSelected(bulkSelect.docCount) }}</span>
+        <span class="bulk-count">{{ L.bulkSelected(bulkSelect.totalCount) }}</span>
         <button type="button" class="icon-btn" :title="L.bulkOff" @click="bulkSelect.exit()">
           <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
             <path d="M4 4l8 8 M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
@@ -926,12 +929,12 @@ async function onRootDocDrop(e: DragEvent) {
         </button>
       </div>
       <div class="bulk-actions">
-        <button type="button" class="bulk-btn" :disabled="bulkSelect.docCount === 0" @click="onBulkMove">{{ L.bulkMove }}</button>
-        <button type="button" class="bulk-btn" :disabled="bulkSelect.docCount === 0" @click="onBulkTagAdd">{{ L.bulkTag }}</button>
-        <button type="button" class="bulk-btn" :disabled="bulkSelect.docCount === 0" @click="onBulkTagRemove">{{ L.bulkUntag }}</button>
-        <button type="button" class="bulk-btn" :disabled="bulkSelect.docCount === 0" @click="onBulkAnalyze">{{ L.bulkAnalyze }}</button>
-        <button type="button" class="bulk-btn" :disabled="bulkSelect.docCount === 0" @click="onBulkExport">{{ L.bulkExport }}</button>
-        <button type="button" class="bulk-btn bulk-btn--danger" :disabled="bulkSelect.docCount === 0" @click="onBulkTrash">{{ L.bulkTrash }}</button>
+        <button type="button" class="bulk-btn" :disabled="!bulkSelect.hasSelection" @click="onBulkMove">{{ L.bulkMove }}</button>
+        <button type="button" class="bulk-btn" :disabled="!bulkSelect.hasSelection" @click="onBulkTagAdd">{{ L.bulkTag }}</button>
+        <button type="button" class="bulk-btn" :disabled="!bulkSelect.hasSelection" @click="onBulkTagRemove">{{ L.bulkUntag }}</button>
+        <button type="button" class="bulk-btn" :disabled="!bulkSelect.hasSelection" @click="onBulkAnalyze">{{ L.bulkAnalyze }}</button>
+        <button type="button" class="bulk-btn" :disabled="!bulkSelect.hasSelection" @click="onBulkExport">{{ L.bulkExport }}</button>
+        <button type="button" class="bulk-btn bulk-btn--danger" :disabled="!bulkSelect.hasSelection" @click="onBulkTrash">{{ L.bulkTrash }}</button>
       </div>
     </div>
 

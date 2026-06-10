@@ -11,8 +11,13 @@
  *   - tag-remove(tag) — remove `tag` from `doc_analyses.tags`
  *   - export — stream a ZIP of HTML renders, like the workspace export
  *
+ * Selecting a FOLDER in the sidebar acts on every active note inside it
+ * (recursively): `folderIds` are expanded to their contained doc ids and
+ * unioned with `docIds` before the action runs. So a folder-only selection is
+ * valid as long as it resolves to at least one note.
+ *
  * Body shape (zod):
- *   { action, docIds, folderId?, tag? }
+ *   { action, docIds?, folderIds?, folderId?, tag? }
  */
 import { Readable } from 'node:stream'
 import archiver from 'archiver'
@@ -32,12 +37,23 @@ import {
   encryptAnalysis,
 } from '~/server/utils/encrypted-entities'
 import { buildHtml, slugify } from '~/server/utils/export'
-import { analyzeUserDocument, softDeleteUserDocument, updateUserDocument } from '~/server/utils/notes'
+import {
+  analyzeUserDocument,
+  collectActiveDocIdsInFolders,
+  softDeleteUserDocument,
+  updateUserDocument,
+} from '~/server/utils/notes'
 import { requireUser } from '~/server/utils/require-user'
+
+/** Upper bound on the resolved doc set (docs + folder expansion) per call. */
+const MAX_BULK_DOCS = 1000
 
 const Body = z.object({
   action: z.enum(['move', 'trash', 'tag-add', 'tag-remove', 'export', 'analyze']),
-  docIds: z.array(z.number().int().positive()).min(1).max(500),
+  // Either or both may be supplied; folders expand to the notes they contain.
+  docIds: z.array(z.number().int().positive()).max(500).optional().default([]),
+  folderIds: z.array(z.number().int().positive()).max(200).optional().default([]),
+  // Move target (NOT a selection) — kept singular and distinct from `folderIds`.
   folderId: z.number().int().positive().nullable().optional(),
   tag: z.string().trim().min(1).max(80).optional(),
 })
@@ -53,10 +69,21 @@ export default defineEventHandler(async (event) => {
   const dek = await getDek(event)
   const db = useDb()
 
-  // De-dup. Even with the zod min(1), an empty after-dedup list = bail.
-  const ids = Array.from(new Set(input.docIds))
+  // Expand any selected folders into the active notes they contain (recursive),
+  // then union with the explicitly-selected docs. So selecting a folder acts on
+  // every note inside it — for analyze/tag/export/move/trash alike.
+  const fromFolders = input.folderIds.length > 0
+    ? await collectActiveDocIdsInFolders(user.id, input.folderIds)
+    : []
+  const ids = Array.from(new Set([...input.docIds, ...fromFolders]))
   if (ids.length === 0) {
-    throw createError({ statusCode: 400, statusMessage: 'docIds is empty' })
+    throw createError({ statusCode: 400, statusMessage: 'Selection resolves to no documents' })
+  }
+  if (ids.length > MAX_BULK_DOCS) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: `Selection too large (${ids.length} notes, max ${MAX_BULK_DOCS})`,
+    })
   }
 
   /* -------- action: export (streams a ZIP, returns response directly) -------- */

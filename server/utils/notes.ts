@@ -684,6 +684,31 @@ async function collectActiveSubtreeFolderIds(rootId: number): Promise<number[]> 
 }
 
 /**
+ * Expand a set of folders into the ids of every ACTIVE document living anywhere
+ * in their subtrees (recursive). Each root folder's ownership is asserted first,
+ * so a forbidden/missing folder throws the canonical 403/404. Used by bulk
+ * operations so selecting a folder acts on all the notes it contains.
+ */
+export async function collectActiveDocIdsInFolders(
+  userId: number,
+  folderIds: number[],
+): Promise<number[]> {
+  if (folderIds.length === 0) return []
+  const db = useDb()
+  const allFolderIds = new Set<number>()
+  for (const id of new Set(folderIds)) {
+    await assertFolderOwnership(userId, id)
+    for (const fid of await collectActiveSubtreeFolderIds(id)) allFolderIds.add(fid)
+  }
+  if (allFolderIds.size === 0) return []
+  const rows = await db
+    .select({ id: documents.id })
+    .from(documents)
+    .where(and(inArray(documents.folderId, [...allFolderIds]), isNull(documents.deletedAt)))
+  return rows.map(r => r.id)
+}
+
+/**
  * Soft-delete a folder and its entire active subtree (folders + documents)
  * with a SHARED `deletedAt` timestamp. The restore endpoint relies on the
  * shared timestamp to re-hydrate the same group of items.
