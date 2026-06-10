@@ -36,6 +36,7 @@ import {
   mistralEmbed,
   type MistralMessage,
   type MistralMessageContentPart,
+  type MistralStreamEvent,
 } from '~/server/utils/mistral'
 import { bestSentence } from '~/server/utils/best-sentence'
 import { extractCitations } from '~/server/utils/citations'
@@ -182,14 +183,6 @@ have no info on, current events, prices, etc.), reply concisely:
 voir en ligne."  (or the English equivalent if the user is writing in
 English). Do NOT invent facts. Do NOT pretend you searched.`
 
-const SYSTEM_PROMPT_WEB_AVAILABLE = `You have a \`web_search\` tool. Use it ONLY when the answer is not already in
-CONTEXT and requires external/current information (current events, prices,
-people/products/companies the notes don't cover). If CONTEXT already answers
-the question, reply directly — do NOT search. When you do search, call
-\`web_search\` with a single focused query and write nothing else that turn;
-the search results will come back and you'll answer from them. Never claim you
-searched when you didn't.`
-
 const SYSTEM_PROMPT_WEB_ON_HIT = `Web search ran for this turn and returned results, marked "(Web)" in CONTEXT.
 
 How to use web results correctly:
@@ -201,11 +194,40 @@ How to use web results correctly:
   entity-extraction question, pull the entity names from the SNIPPETS and
   group them. Cite each named entity with the [#N] of the snippet that
   mentioned it. Never list article titles as if they were the answer.
+- RELEVANCE CHECK: web results are keyword matches and may be about a COMPLETELY
+  different subject that merely shares a name (a different game, franchise, or
+  product). If a result is not clearly about the SAME thing the user is asking
+  about — especially when the notes establish a specific universe/context —
+  IGNORE it: do not cite it, do not mention it. If none of the results actually
+  match, say plainly that nothing relevant was found online. Never stitch an
+  unrelated result (e.g. a World-of-Warcraft page for a Minecraft item) into the
+  answer.
 - When snippets disagree or are sparse, say so explicitly. Don't pad.`
 
 const SYSTEM_PROMPT_WEB_ON_MISS = `Web search ran for this turn but returned no usable results. Tell the user
 plainly in ONE sentence that nothing matched online (in their language). Do
 NOT pretend further search is happening; do NOT invent facts.`
+
+/**
+ * Sentinel the model emits on the FIRST (notes-only) pass when the notes don't
+ * contain the answer. The server intercepts it (never shown to the user) and
+ * escalates to a web search instead. Kept distinctive so natural prose can't
+ * collide with it.
+ */
+const NO_NOTES_SENTINEL = '__NO_NOTES__'
+
+const SYSTEM_PROMPT_NOTES_FIRST = `Answer the user's question using ONLY the notes in CONTEXT.
+
+- If CONTEXT contains the answer, reply normally with inline [#N] citations.
+- If CONTEXT does NOT contain the answer — or only holds loosely-related notes
+  that don't actually answer it — your ENTIRE reply must be exactly this token,
+  with nothing before or after it:
+${NO_NOTES_SENTINEL}
+  In that case do NOT apologize, do NOT explain, do NOT write a sentence — output
+  only the token. This OVERRIDES any earlier instruction to say you didn't find
+  it: a web search will run automatically and you'll answer from its results.
+- Never pad a non-answer. Either the notes answer it (reply) or they don't
+  (emit the token, nothing else).`
 
 /**
  * Extra system prompt when the user has allowed write tools. Spelled out
@@ -294,27 +316,6 @@ async function generateFollowups(question: string, answer: string, userId: numbe
 /* -------------------------------------------------------------------------- */
 /*  Agentic tool descriptors (N8)                                              */
 /* -------------------------------------------------------------------------- */
-
-/**
- * Web-search function tool offered to the model on every turn (when a Tavily
- * key is configured). The model decides whether to call it — "enabled by
- * default, used if needed". When it fires we run Tavily, fold the hits into
- * CONTEXT, and re-stream the answer (see the handler's streaming loop).
- */
-const WEB_SEARCH_TOOL = {
-  type: 'function' as const,
-  function: {
-    name: 'web_search',
-    description: 'Search the public web for current or external facts that are NOT in the user\'s notes (current events, prices, people/products/companies the notes do not cover). Do not call this when the answer is already in CONTEXT.',
-    parameters: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'A focused web search query. Resolve pronouns/anaphora from the conversation into a standalone query.' },
-      },
-      required: ['query'],
-    },
-  },
-}
 
 const WRITE_TOOLS = [
   {
@@ -592,10 +593,10 @@ export default defineEventHandler(async (event) => {
       ]
     : input.message
 
-  // Assemble the full message list: base policy + capability disclosure + the
+  // Assemble the full message list: base policy + capability clause + the
   // retrieved CONTEXT block + optional tools clause, then history + user turn.
-  // `capabilityClause` shifts across passes: before any web search the model is
-  // told it HAS a web_search tool; after one runs it gets the hit/miss guidance.
+  // `capabilityClause` shifts across passes: pass 1 gets the notes-first probe
+  // clause; after a web search runs, pass 2 gets the hit/miss guidance.
   function composeMessages(capabilityClause: string, srcs: AnySource[]): MistralMessage[] {
     const systemMessages: MistralMessage[] = [
       { role: 'system', content: SYSTEM_PROMPT_BASE },
@@ -607,8 +608,6 @@ export default defineEventHandler(async (event) => {
     }
     return [...systemMessages, ...historyMessages, { role: 'user', content: finalUserContent }]
   }
-
-  const initialCapabilityClause = webEnabled ? SYSTEM_PROMPT_WEB_AVAILABLE : SYSTEM_PROMPT_WEB_OFF
 
   /* ---------- 6b. Model routing ------------------------------------------ */
   // Vision wins when an image is in play and the caller didn't pin a model.
@@ -762,8 +761,9 @@ export default defineEventHandler(async (event) => {
         return
       }
 
-      // Build the prompt now that the note context is resolved.
-      const messages: MistralMessage[] = composeMessages(initialCapabilityClause, sources)
+      // Base prompt for the optional write-tool probe (allowWrites). The web
+      // policy is applied per-pass in the streaming section below.
+      const messages: MistralMessage[] = composeMessages(SYSTEM_PROMPT_WEB_OFF, sources)
 
       // N8 — tool-call pre-flight. When the user toggled `allowWrites`, run a
       // non-streaming probe first to see if the model wants to call a write
@@ -811,69 +811,54 @@ export default defineEventHandler(async (event) => {
       }
 
       if (!toolCallEmitted) {
-        // Up to two passes. Pass 1 offers the `web_search` tool; if the model
-        // calls it we run Tavily (search + deep-extract), fold the hits into
-        // CONTEXT, and pass 2 answers from the enriched context with no tools.
-        // The common case (no web needed) finishes in pass 1.
-        let passMessages = messages
-        let passTools: Array<Record<string, unknown>> | undefined = webEnabled ? [WEB_SEARCH_TOOL] : undefined
-        let passToolChoice: string | Record<string, unknown> | undefined = webEnabled
-          ? (forceWeb ? { type: 'function', function: { name: 'web_search' } } : 'auto')
-          : undefined
+        // Two-pass, notes-first web policy:
+        //   Pass 1 — answer from the notes alone. If the model decides the notes
+        //            don't hold the answer it emits NO_NOTES_SENTINEL (intercepted,
+        //            never shown).
+        //   Pass 2 — only when pass 1 signalled (or the toggle forced it): run a
+        //            web search, then answer from the enriched CONTEXT.
+        // So the web fires automatically only when the notes come up short —
+        // no manual toggle, no off-topic results dragged into a grounded answer.
 
-        for (let pass = 0; pass < 2; pass++) {
-          let pendingWebQuery: string | null = null
-          let textThisPass = false
+        // Fold native `reference` citations into the cited set (shared by passes).
+        const recordReferences = (refs: Extract<MistralStreamEvent, { kind: 'reference' }>['refs']): void => {
+          for (const r of refs) {
+            if (typeof r.id === 'number' && r.id >= 1 && r.id <= sources.length) {
+              nativeCited.add(r.id)
+              continue
+            }
+            if (typeof r.url === 'string' && r.url.length > 0) {
+              const idx = sources.findIndex(s => 'url' in s && (s as WebSourceRef).url === r.url)
+              if (idx >= 0) { nativeCited.add(idx + 1); continue }
+            }
+            if (typeof r.title === 'string' && r.title.length > 0) {
+              const needle = r.title.trim().toLowerCase()
+              const idx = sources.findIndex(s => s.title.trim().toLowerCase() === needle)
+              if (idx >= 0) { nativeCited.add(idx + 1); continue }
+            }
+          }
+        }
+
+        // Stream a message list straight through (deltas + citations). Returns
+        // false when the Mistral call errored (an error frame was already sent).
+        const streamAnswer = async (msgs: MistralMessage[]): Promise<boolean> => {
           try {
             for await (const ev of mistralChatStream({
-              messages: passMessages,
+              messages: msgs,
               temperature: chatTemperature,
               userId,
               operation: 'chat_stream',
-              ...(passTools ? { tools: passTools, toolChoice: passToolChoice } : {}),
               ...(chatModel ? { model: chatModel } : {}),
             })) {
               if (ev.kind === 'text') {
                 collected += ev.text
-                textThisPass = true
                 send({ type: 'delta', text: ev.text })
               }
               else if (ev.kind === 'reference') {
-                for (const r of ev.refs) {
-                  if (typeof r.id === 'number' && r.id >= 1 && r.id <= sources.length) {
-                    nativeCited.add(r.id)
-                    continue
-                  }
-                  if (typeof r.url === 'string' && r.url.length > 0) {
-                    const idx = sources.findIndex(s => 'url' in s && (s as WebSourceRef).url === r.url)
-                    if (idx >= 0) { nativeCited.add(idx + 1); continue }
-                  }
-                  if (typeof r.title === 'string' && r.title.length > 0) {
-                    const needle = r.title.trim().toLowerCase()
-                    const idx = sources.findIndex(s => s.title.trim().toLowerCase() === needle)
-                    if (idx >= 0) { nativeCited.add(idx + 1); continue }
-                  }
-                }
-              }
-              else if (ev.kind === 'tool_call') {
-                // Honor a web_search call only if the model led with it (no answer
-                // text streamed yet) and we haven't already searched this turn.
-                if (!webUsed && !textThisPass && collected.length === 0) {
-                  const wc = ev.calls.find(c => c.name === 'web_search')
-                  if (wc) {
-                    let q = retrievalQuery
-                    try {
-                      const parsedArgs = JSON.parse(wc.arguments) as { query?: unknown }
-                      if (typeof parsedArgs.query === 'string' && parsedArgs.query.trim().length > 0) {
-                        q = parsedArgs.query.trim()
-                      }
-                    }
-                    catch { /* malformed args → fall back to the rewritten retrieval query */ }
-                    pendingWebQuery = q
-                  }
-                }
+                recordReferences(ev.refs)
               }
             }
+            return true
           }
           catch (err) {
             errored = true
@@ -881,20 +866,70 @@ export default defineEventHandler(async (event) => {
               ?? (err as Error).message
               ?? 'unknown error'
             send({ type: 'error', error: 'mistral_failed', detail })
-            break
+            return false
           }
+        }
 
-          // No web search requested → the streamed text is the answer.
-          if (!pendingWebQuery || webUsed) break
+        // Pass 1: notes-only answer. Buffer the leading tokens so a bare
+        // NO_NOTES_SENTINEL is intercepted (not shown) and turned into a web
+        // escalation. Returns 'needWeb' to escalate, 'answered' when the notes
+        // answer was streamed, 'error' on failure.
+        const answerFromNotes = async (msgs: MistralMessage[]): Promise<'answered' | 'needWeb' | 'error'> => {
+          let buffer = ''
+          let decided = false
+          try {
+            for await (const ev of mistralChatStream({
+              messages: msgs,
+              temperature: chatTemperature,
+              userId,
+              operation: 'chat_stream',
+              ...(chatModel ? { model: chatModel } : {}),
+            })) {
+              if (ev.kind === 'reference') { recordReferences(ev.refs); continue }
+              if (ev.kind !== 'text') continue
+              if (decided) {
+                collected += ev.text
+                send({ type: 'delta', text: ev.text })
+                continue
+              }
+              buffer += ev.text
+              const compact = buffer.replace(/\s/g, '')
+              // Still ambiguous: the buffer could yet grow into the sentinel.
+              if (compact.length < NO_NOTES_SENTINEL.length && NO_NOTES_SENTINEL.startsWith(compact)) continue
+              if (buffer.trim().startsWith(NO_NOTES_SENTINEL)) return 'needWeb'
+              decided = true
+              collected += buffer
+              send({ type: 'delta', text: buffer })
+              buffer = ''
+            }
+            // Stream ended while still buffering (answer shorter than the sentinel).
+            if (!decided) {
+              if (buffer.trim().startsWith(NO_NOTES_SENTINEL)) return 'needWeb'
+              if (buffer.length > 0) {
+                collected += buffer
+                send({ type: 'delta', text: buffer })
+              }
+            }
+            return 'answered'
+          }
+          catch (err) {
+            errored = true
+            const detail = (err as { data?: { detail?: string }, message?: string }).data?.detail
+              ?? (err as Error).message
+              ?? 'unknown error'
+            send({ type: 'error', error: 'mistral_failed', detail })
+            return 'error'
+          }
+        }
 
+        // Run Tavily (search + deep-extract) and fold the hits into `sources`.
+        const runWebSearch = async (q: string): Promise<void> => {
           webUsed = true
-          send({ type: 'step', step: 'web', status: 'running', query: truncate(pendingWebQuery, 200) })
+          send({ type: 'step', step: 'web', status: 'running', query: truncate(q, 200) })
 
-          const searchResult = await tavilySearch(pendingWebQuery, { maxResults: WEB_MAX_SOURCES })
+          const searchResult = await tavilySearch(q, { maxResults: WEB_MAX_SOURCES })
           webDebug = searchResult.debug
 
-          // Deep-extract the top hits for full page content; fall back to the
-          // search snippet for the rest (and on any extract failure).
           const topUrls = searchResult.hits.slice(0, WEB_EXTRACT_TOP).map(h => h.url)
           let extractByUrl = new Map<string, string>()
           if (topUrls.length > 0) {
@@ -914,22 +949,35 @@ export default defineEventHandler(async (event) => {
           }
           sources = [...noteSources, ...webSources]
 
-          // Surface the finished search + its results (title + url) so the
-          // "Recherche web — N résultats" step can list the sources inline.
           send({
             type: 'step',
             step: 'web',
             status: 'done',
-            query: truncate(pendingWebQuery, 200),
+            query: truncate(q, 200),
             count: webSources.length,
             sources: webSources.map(s => ({ title: s.title, url: s.url })),
           })
+        }
 
-          // Recompose for pass 2: enriched CONTEXT + hit/miss guidance, no tools.
+        let needWeb = false
+        if (!webEnabled) {
+          // No web configured — single notes-only answer (no escalation path).
+          await streamAnswer(composeMessages(SYSTEM_PROMPT_WEB_OFF, sources))
+        }
+        else if (forceWeb) {
+          // User forced the web — skip the notes-only pass, search straight away.
+          needWeb = true
+        }
+        else {
+          // Notes-first: answer from notes; escalate only if the model signals it.
+          const verdict = await answerFromNotes(composeMessages(SYSTEM_PROMPT_NOTES_FIRST, sources))
+          needWeb = verdict === 'needWeb'
+        }
+
+        if (needWeb && !errored) {
+          await runWebSearch(retrievalQuery)
           const clause = webSources.length > 0 ? SYSTEM_PROMPT_WEB_ON_HIT : SYSTEM_PROMPT_WEB_ON_MISS
-          passMessages = composeMessages(clause, sources)
-          passTools = undefined
-          passToolChoice = undefined
+          await streamAnswer(composeMessages(clause, sources))
         }
       }
 
