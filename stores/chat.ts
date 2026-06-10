@@ -30,6 +30,32 @@ export interface PendingToolCall {
   arguments: Record<string, unknown>
 }
 
+/** A web result surfaced inside the "Recherche web" step. */
+export interface ChatStepSource {
+  title: string
+  url: string
+}
+
+/**
+ * One stage of the pre-answer pipeline, rendered as a discreet step ABOVE the
+ * assistant bubble. Driven live by the server's `step` SSE frames; for reopened
+ * sessions it's reconstructed from the persisted `meta` (all `done`).
+ *  - thinking → "Réflexion… / Réflexion terminée"
+ *  - notes    → "Recherche dans les notes… / N note(s) trouvée(s)" (count)
+ *  - web      → "Recherche web… / Recherche web — N résultat(s)" (count + sources)
+ */
+export interface ChatStep {
+  kind: 'thinking' | 'notes' | 'web'
+  status: 'running' | 'done'
+  /** Result count once `done` (notes found / web results). */
+  count?: number
+  /** Web results to list inline under the `web` step. */
+  sources?: ChatStepSource[]
+}
+
+/** Canonical step ordering for upsert + reconstruction. */
+const STEP_ORDER: ChatStep['kind'][] = ['thinking', 'notes', 'web']
+
 export interface UIChatMessage {
   id: number | string         // negative / string for optimistic rows
   role: 'user' | 'assistant' | 'system'
@@ -48,17 +74,17 @@ export interface UIChatMessage {
   /** Number of web hits found by the search; 0 = nothing matched. */
   webAutoHits?: number
   /**
-   * Live activity phase for a still-pending assistant turn (Wave 5). Drives the
-   * "Réflexion… / Recherche web… / Rédaction…" indicator. Ephemeral — undefined
-   * once the turn finishes.
+   * Live activity phase for a still-pending assistant turn. Kept for internal
+   * bookkeeping (flips to 'writing' on the first delta); the visible progress is
+   * now the `steps` timeline, not this field.
    */
   status?: 'thinking' | 'web' | 'writing'
   /**
-   * Visible web-search step (Wave 5). Surfaced while/after the model calls the
-   * `web_search` tool so the user can see what was searched. Ephemeral (live
-   * turns only); historic turns reconstruct a static badge from `meta`.
+   * Pre-answer pipeline steps rendered ABOVE the bubble (Réflexion → Recherche
+   * dans les notes → Recherche web). Live turns receive `step` SSE frames;
+   * reopened sessions reconstruct these from `meta`.
    */
-  webStep?: { query: string, status: 'running' | 'done', hits: number }
+  steps?: ChatStep[]
   /** Per-turn debug meta (model used, web state, retrieval query, …). Populated from the SSE `meta` frame. */
   meta?: {
     model: string | null
@@ -81,13 +107,6 @@ export interface UIChatMessage {
     scopeFolderId: number | null
     temperature: number | null
   }
-  /**
-   * Working source list emitted by the server BEFORE the answer finishes
-   * streaming (Wave 4 / N9). The UI renders a "searching X, Y, Z" hint
-   * under the still-pending bubble; the final `done` frame replaces these
-   * with the cited subset in `sources`.
-   */
-  partialSources?: ChatSource[]
   /**
    * Pending tool calls the assistant proposed (Wave 4 / N8). The bubble
    * renders an approve/reject card per call. In-memory only — once the
@@ -240,6 +259,32 @@ function adaptMessage(m: LoadedChatMessage): UIChatMessage {
         }
       : {}),
   }
+}
+
+/**
+ * Merge a `step` SSE frame into the message's step timeline. Updates the
+ * matching step in place (status / count / sources) or appends a new one, then
+ * keeps them in canonical order. Reassigns `msg.steps` so Pinia tracks it.
+ */
+function upsertStep(msg: UIChatMessage, next: ChatStep): void {
+  const steps = msg.steps ? [...msg.steps] : []
+  const existing = steps.find(s => s.kind === next.kind)
+  if (existing) {
+    existing.status = next.status
+    if (next.count !== undefined) existing.count = next.count
+    if (next.sources !== undefined) existing.sources = next.sources
+  }
+  else {
+    steps.push({ ...next })
+  }
+  steps.sort((a, b) => STEP_ORDER.indexOf(a.kind) - STEP_ORDER.indexOf(b.kind))
+  msg.steps = steps
+}
+
+/** Force any still-running steps to `done` (turn ended / errored / aborted). */
+function finishSteps(msg: UIChatMessage): void {
+  if (!msg.steps) return
+  msg.steps = msg.steps.map(s => (s.status === 'running' ? { ...s, status: 'done' as const } : s))
 }
 
 /**
@@ -895,6 +940,9 @@ export const useChatStore = defineStore('chat', {
         sources: [],
         pending: true,
         status: 'thinking',
+        // Seed the first step so the timeline shows instantly, before the
+        // server's own `step` frames arrive (they upsert onto this).
+        steps: [{ kind: 'thinking', status: 'running' }],
       })
 
       const findAssistant = (): UIChatMessage | undefined =>
@@ -1012,22 +1060,29 @@ export const useChatStore = defineStore('chat', {
               sources = event.sources as ChatSource[]
               a.sources = sources
             }
-            else if (event.type === 'partial_sources' && Array.isArray(event.sources)) {
-              // Wave 4 / N9 — show "searching X, Y, Z" while the answer
-              // streams. Cleared / overridden by the final `done` frame.
-              a.partialSources = event.sources as ChatSource[]
-            }
-            else if (event.type === 'tool_step' && event.tool === 'web_search') {
-              // Wave 5 — the model called the `web_search` tool. Surface a
-              // visible step ("Recherche web : <query>") and flip the live
-              // activity phase so the indicator reads "Recherche web…".
-              const status = event.status === 'done' ? 'done' : 'running'
-              a.webStep = {
-                query: typeof event.query === 'string' ? event.query : '',
-                status,
-                hits: typeof event.hits === 'number' ? event.hits : 0,
+            else if (event.type === 'step' && typeof event.step === 'string') {
+              // Pre-answer pipeline step (Réflexion → Recherche notes →
+              // Recherche web). Drives the discreet step timeline above the
+              // bubble. Web steps also flip the internal activity phase.
+              const kind = event.step
+              if (kind === 'thinking' || kind === 'notes' || kind === 'web') {
+                const status = event.status === 'done' ? 'done' : 'running'
+                const stepSources = Array.isArray(event.sources)
+                  ? (event.sources as unknown[])
+                      .filter((s): s is ChatStepSource =>
+                        !!s && typeof s === 'object'
+                        && typeof (s as ChatStepSource).title === 'string'
+                        && typeof (s as ChatStepSource).url === 'string')
+                      .map(s => ({ title: s.title, url: s.url }))
+                  : undefined
+                upsertStep(a, {
+                  kind,
+                  status,
+                  ...(typeof event.count === 'number' ? { count: event.count } : {}),
+                  ...(stepSources ? { sources: stepSources } : {}),
+                })
+                if (kind === 'web') a.status = status === 'done' ? 'writing' : 'web'
               }
-              a.status = status === 'done' ? 'writing' : 'web'
             }
             else if (event.type === 'meta') {
               // Per-turn debug meta. Snapshot whatever the server sent —
@@ -1092,9 +1147,9 @@ export const useChatStore = defineStore('chat', {
             else if (event.type === 'done') {
               a.pending = false
               a.status = undefined
+              // Settle any spinner still showing as running.
+              finishSteps(a)
               if (Array.isArray(event.sources)) a.sources = event.sources as ChatSource[]
-              // Drop the partial-sources hint once the cited list is in.
-              a.partialSources = undefined
               if (typeof event.sessionId === 'number') {
                 this.currentSessionId = event.sessionId
               }
@@ -1109,6 +1164,7 @@ export const useChatStore = defineStore('chat', {
             else if (event.type === 'error') {
               a.pending = false
               a.status = undefined
+              finishSteps(a)
               a.errored = true
               const detail = typeof event.detail === 'string' ? event.detail : 'Mistral error'
               a.content = a.content
@@ -1119,7 +1175,10 @@ export const useChatStore = defineStore('chat', {
         }
 
         const a = findAssistant()
-        if (a) a.pending = false
+        if (a) {
+          a.pending = false
+          finishSteps(a)
+        }
 
         // Refresh the session list when a new session was created — pick the
         // right list depending on current scope so the new session shows up.
@@ -1138,6 +1197,7 @@ export const useChatStore = defineStore('chat', {
         const isAbort = (err as { name?: string }).name === 'AbortError'
         if (a) {
           a.pending = false
+          finishSteps(a)
           if (isAbort) {
             // User clicked Stop — keep whatever tokens we already streamed.
             if (a.content.length === 0) a.content = '[stopped]'

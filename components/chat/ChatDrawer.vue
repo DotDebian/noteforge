@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
-import { useChatStore, type ChatSource, type PendingToolCall, type UIChatMessage } from '~/stores/chat'
+import { useChatStore, type ChatSource, type ChatStep, type PendingToolCall, type UIChatMessage } from '~/stores/chat'
 import { useWorkspacesStore } from '~/stores/workspaces'
 import { useTreeStore } from '~/stores/tree'
 import { renderMarkdown } from '~/composables/useMarkdownView'
@@ -475,9 +475,16 @@ const lastAssistantId = computed(() => {
   return null
 })
 
-function isLastAssistant(m: UIChatMessage): boolean {
-  return lastAssistantId.value === m.id
-}
+/**
+ * Follow-up suggestions for the latest assistant reply, surfaced ABOVE the
+ * composer (not inside the bubble). Hidden while a turn is streaming.
+ */
+const currentFollowups = computed<string[]>(() => {
+  const id = lastAssistantId.value
+  if (id == null) return []
+  const m = messages.value.find(x => x.id === id)
+  return m?.followups ?? []
+})
 
 async function onFollowup(question: string) {
   if (sending.value) return
@@ -684,15 +691,14 @@ const L = computed(() => locale.value === 'fr'
       branchedFrom: 'Branché depuis « {title} »',
       branchedFromUnknown: 'Branché depuis une session',
       optionsTitle: 'Options',
-      webAutoOn: 'Recherche web activée pour ce tour',
-      webAutoEmpty: 'Recherche web : aucun résultat',
-      webAutoTitle: 'NoteForge a détecté que vous demandiez une recherche web et l’a lancée pour ce tour, même si l’option est désactivée.',
-      thinking: 'Réflexion…',
-      searchingWeb: 'Recherche web…',
-      writing: 'Rédaction…',
-      webStepRunning: 'Recherche sur le web',
-      webStepDone: 'Recherche web',
-      webStepResults: '{n} résultat(s)',
+      stepThinkingRunning: 'Réflexion…',
+      stepThinkingDone: 'Réflexion terminée',
+      stepNotesRunning: 'Recherche dans les notes…',
+      stepNotesEmpty: 'Aucune note trouvée',
+      stepNotesDone: '{n} note(s) trouvée(s)',
+      stepWebRunning: 'Recherche web…',
+      stepWebEmpty: 'Recherche web — aucun résultat',
+      stepWebDone: 'Recherche web — {n} résultat(s)',
       debugCopy: 'Copier',
       debugCopied: 'Copié',
       debugCopyTitle: 'Copier les infos debug (à coller pour rapporter un souci)',
@@ -704,32 +710,78 @@ const L = computed(() => locale.value === 'fr'
       branchedFrom: 'Branched from "{title}"',
       branchedFromUnknown: 'Branched from another session',
       optionsTitle: 'Options',
-      webAutoOn: 'Web search auto-enabled for this turn',
-      webAutoEmpty: 'Web search returned no results',
-      webAutoTitle: 'NoteForge detected a web-search intent in your message and ran a one-off search even though the option is off.',
-      thinking: 'Thinking…',
-      searchingWeb: 'Searching the web…',
-      writing: 'Writing…',
-      webStepRunning: 'Searching the web',
-      webStepDone: 'Web search',
-      webStepResults: '{n} result(s)',
+      stepThinkingRunning: 'Thinking…',
+      stepThinkingDone: 'Thinking complete',
+      stepNotesRunning: 'Searching your notes…',
+      stepNotesEmpty: 'No notes found',
+      stepNotesDone: '{n} note(s) found',
+      stepWebRunning: 'Searching the web…',
+      stepWebEmpty: 'Web search — no results',
+      stepWebDone: 'Web search — {n} result(s)',
       debugCopy: 'Copy',
       debugCopied: 'Copied',
       debugCopyTitle: 'Copy debug info (paste it back when reporting an issue)',
     })
 
 /**
- * Label for the live "thinking / searching / writing" indicator shown under a
- * still-pending assistant bubble, driven by the streamed `status` phase.
+ * Steps rendered ABOVE the assistant bubble. Live turns carry `m.steps`
+ * (driven by the server's `step` frames); reopened sessions have no live steps
+ * so we reconstruct a static, all-done timeline from the persisted `meta`.
  */
-function streamingLabel(m: UIChatMessage): string {
-  if (m.status === 'web') return L.value.searchingWeb
-  if (m.status === 'writing') return L.value.writing
-  return L.value.thinking
+function displaySteps(m: UIChatMessage): ChatStep[] {
+  if (m.role !== 'assistant') return []
+  if (m.steps && m.steps.length > 0) return m.steps
+  if (!m.errored && m.meta) {
+    const steps: ChatStep[] = [
+      { kind: 'thinking', status: 'done' },
+      { kind: 'notes', status: 'done', count: m.meta.noteHits },
+    ]
+    if (m.meta.webUsed) {
+      const webSrc = m.sources
+        .filter(s => s.kind === 'web')
+        .map(s => ({ title: s.title || 'Web', url: s.url || '' }))
+        .filter(s => s.url.length > 0)
+      steps.push({
+        kind: 'web',
+        status: 'done',
+        count: m.meta.webHits,
+        ...(webSrc.length > 0 ? { sources: webSrc } : {}),
+      })
+    }
+    return steps
+  }
+  return []
 }
 
-function webStepResultsLabel(n: number): string {
-  return L.value.webStepResults.replace('{n}', String(n))
+/** Resolve a step to its localized label, depending on status + count. */
+function stepLabel(step: ChatStep): string {
+  if (step.kind === 'thinking') {
+    return step.status === 'running' ? L.value.stepThinkingRunning : L.value.stepThinkingDone
+  }
+  if (step.kind === 'notes') {
+    if (step.status === 'running') return L.value.stepNotesRunning
+    const n = step.count ?? 0
+    return n === 0 ? L.value.stepNotesEmpty : L.value.stepNotesDone.replace('{n}', String(n))
+  }
+  // web
+  if (step.status === 'running') return L.value.stepWebRunning
+  const n = step.count ?? 0
+  return n === 0 ? L.value.stepWebEmpty : L.value.stepWebDone.replace('{n}', String(n))
+}
+
+/**
+ * Whether to render the message bubble at all. While only the step timeline is
+ * running (assistant pending, no text yet) we show JUST the steps — no empty
+ * grey bubble.
+ */
+function hasBubble(m: UIChatMessage): boolean {
+  if (m.role === 'user') return true
+  if (m.content.length > 0) return true
+  if (m.errored) return true
+  if (m.pendingToolCalls && m.pendingToolCalls.length > 0) return true
+  if (m.sources.length > 0) return true
+  if (showNoNotesHelp(m)) return true
+  return false
 }
 
 /* ---------------- Composer focus + options popover ---------------- */
@@ -1026,7 +1078,45 @@ const scopeValue = computed(() => {
             class="msg-wrap group"
             :class="m.role === 'user' ? 'msg-wrap--user' : 'msg-wrap--assistant'"
           >
+            <!-- Pre-answer step timeline: Réflexion → Recherche notes → Recherche web -->
             <div
+              v-if="m.role === 'assistant' && displaySteps(m).length"
+              class="chat-steps"
+            >
+              <div
+                v-for="step in displaySteps(m)"
+                :key="`${m.id}-step-${step.kind}`"
+                class="chat-step"
+                :class="{ 'chat-step--running': step.status === 'running' }"
+              >
+                <span class="chat-step-indicator" aria-hidden="true">
+                  <span v-if="step.status === 'running'" class="chat-step-spinner"><i /><i /><i /></span>
+                  <svg v-else viewBox="0 0 16 16" width="11" height="11" class="chat-step-check">
+                    <path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </span>
+                <span class="chat-step-body">
+                  <span class="chat-step-label">{{ stepLabel(step) }}</span>
+                  <span
+                    v-if="step.kind === 'web' && step.status === 'done' && step.sources && step.sources.length"
+                    class="chat-step-sources"
+                  >
+                    <a
+                      v-for="(s, wi) in step.sources"
+                      :key="`${m.id}-ws-${wi}`"
+                      :href="s.url"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="chat-step-source"
+                      :title="s.url"
+                    >{{ s.title || s.url }}</a>
+                  </span>
+                </span>
+              </div>
+            </div>
+
+            <div
+              v-if="hasBubble(m)"
               class="max-w-[85%] rounded-2xl px-3 py-2 text-sm shadow-sm"
               :class="m.role === 'user'
                 ? 'bg-accent-500 text-white dark:bg-ink-700 dark:text-ink-50'
@@ -1084,62 +1174,7 @@ const scopeValue = computed(() => {
                     <!-- Streaming caret (Wave 4 / I9) -->
                     <span v-if="m.pending" class="stream-caret" aria-hidden="true">▍</span>
                   </div>
-                  <!-- Live activity indicator (Wave 5): Réflexion / Recherche web / Rédaction -->
-                  <div
-                    v-else-if="m.pending"
-                    class="thinking"
-                    aria-live="polite"
-                  >
-                    <span class="thinking-dots" aria-hidden="true"><i /><i /><i /></span>
-                    <span class="thinking-label">{{ streamingLabel(m) }}</span>
-                  </div>
-                  <p
-                    v-else
-                    class="whitespace-pre-wrap break-words"
-                  />
                 </template>
-
-                <!-- Visible web-search step (Wave 5) — the model called web_search -->
-                <div
-                  v-if="m.role === 'assistant' && m.webStep"
-                  class="web-step"
-                  :class="{ 'web-step--running': m.webStep.status === 'running' }"
-                >
-                  <span class="web-step-icon" aria-hidden="true">🌐</span>
-                  <span class="web-step-body">
-                    <span class="web-step-label">{{ m.webStep.status === 'running' ? L.webStepRunning : L.webStepDone }}<template v-if="m.webStep.status === 'done'"> · {{ webStepResultsLabel(m.webStep.hits) }}</template></span>
-                    <span v-if="m.webStep.query" class="web-step-query">{{ m.webStep.query }}</span>
-                  </span>
-                </div>
-
-                <!-- Partial sources hint (Wave 4 / N9) — only while streaming -->
-                <div
-                  v-if="m.role === 'assistant' && m.pending && m.partialSources && m.partialSources.length"
-                  class="partial-sources"
-                >
-                  <span class="partial-sources-title">{{ t('chat.searchingNotes') }}</span>
-                  <span class="partial-sources-list">
-                    <span
-                      v-for="(s, i) in m.partialSources.slice(0, 4)"
-                      :key="`${m.id}-ps-${i}`"
-                      class="partial-source-chip"
-                    >{{ s.title || (s.kind === 'web' ? 'Web' : `#${s.docId}`) }}</span>
-                    <span v-if="m.partialSources.length > 4" class="partial-source-chip">+{{ m.partialSources.length - 4 }}</span>
-                  </span>
-                </div>
-
-                <!-- Auto-triggered web search badge -->
-                <div
-                  v-if="m.role === 'assistant' && m.webAutoTriggered"
-                  class="web-auto-badge"
-                  :title="L.webAutoTitle"
-                >
-                  <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
-                    <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" />
-                    <path d="M2 8h12 M8 2c2 2 2 10 0 12 M8 2c-2 2-2 10 0 12" fill="none" stroke="currentColor" stroke-width="1.2" />
-                  </svg>
-                  <span>{{ m.webAutoHits && m.webAutoHits > 0 ? L.webAutoOn : L.webAutoEmpty }}</span>
-                </div>
 
                 <!-- Tool-call approval cards (Wave 4 / N8) -->
                 <div
@@ -1345,26 +1380,6 @@ const scopeValue = computed(() => {
                       <dd>{{ formatLatency(m.debug.latencyMs) }}</dd>
                     </div>
                   </dl>
-                </div>
-
-                <!-- Suggested follow-up chips (latest assistant only) -->
-                <div
-                  v-if="m.role === 'assistant' && isLastAssistant(m) && m.followups && m.followups.length"
-                  class="followups"
-                >
-                  <p class="followups-title">{{ t('chat.suggestedFollowupsTitle') }}</p>
-                  <div class="followups-row">
-                    <button
-                      v-for="(q, i) in m.followups"
-                      :key="`${m.id}-fu-${i}`"
-                      type="button"
-                      class="followup-chip"
-                      :disabled="sending"
-                      @click="onFollowup(q)"
-                    >
-                      {{ q }}
-                    </button>
-                  </div>
                 </div>
               </template>
             </div>
@@ -1610,6 +1625,24 @@ const scopeValue = computed(() => {
 
         <!-- Composer -->
         <footer class="composer-footer">
+          <!-- Suggested follow-ups — sit ABOVE the composer, not in the bubble -->
+          <Transition name="fade">
+            <div
+              v-if="!sending && currentFollowups.length"
+              class="composer-followups"
+            >
+              <button
+                v-for="(q, i) in currentFollowups"
+                :key="`fu-${i}`"
+                type="button"
+                class="composer-followup-chip"
+                @click="onFollowup(q)"
+              >
+                {{ q }}
+              </button>
+            </div>
+          </Transition>
+
           <div class="composer-box" :class="{ 'composer-box--focus': composerFocused }">
             <!-- Pending attachment thumbnail (Wave 4 / N7) -->
             <div v-if="pendingAttachmentUrl" class="composer-attach">
@@ -2176,20 +2209,65 @@ html.dark .regen-popover {
   @apply rounded-md bg-accent-500 px-2 py-1 text-[10.5px] uppercase tracking-[0.06em] font-semibold text-white hover:bg-accent-600 disabled:opacity-50 disabled:cursor-not-allowed;
 }
 
-.followups {
-  @apply mt-2;
+/* ----------------- Pre-answer step timeline (above the bubble) -----------------
+ * Réflexion → Recherche dans les notes → Recherche web. Deliberately discreet
+ * and monochrome — the RESULT is what matters, not the working indicator. */
+.chat-steps {
+  @apply mb-1 flex max-w-[85%] flex-col gap-1 px-1;
 }
-.followups-title {
-  @apply mb-1 text-[10px] uppercase tracking-[0.08em] font-semibold text-ink-500 dark:text-ink-400;
+.chat-step {
+  @apply flex items-start gap-1.5 text-[12px] leading-snug text-ink-400 dark:text-ink-500;
+  transition: color 150ms ease;
 }
-.followups-row {
-  @apply flex flex-col gap-1;
+.chat-step--running {
+  @apply text-ink-500 dark:text-ink-400;
 }
-.followup-chip {
-  @apply rounded-md px-2 py-1 text-left text-[12px] text-ink-700 ring-1 ring-ink-200 transition hover:bg-accent-50 hover:text-accent-700 hover:ring-accent-300 disabled:opacity-50 disabled:cursor-not-allowed dark:text-ink-200 dark:ring-ink-700 dark:hover:bg-ink-900 dark:hover:text-accent-300 dark:hover:ring-accent-500;
+.chat-step-indicator {
+  @apply mt-px inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center;
+}
+.chat-step-check {
+  @apply text-ink-400 dark:text-ink-500;
+}
+/* Monochrome version of the "Réflexion" dot loader — smaller + ink-toned. */
+.chat-step-spinner {
+  @apply inline-flex items-center gap-[2px];
+}
+.chat-step-spinner i {
+  @apply inline-block h-1 w-1 rounded-full;
+  background: theme('colors.ink.400');
+  animation: step-bounce 1.2s ease-in-out infinite;
+}
+html.dark .chat-step-spinner i {
+  background: theme('colors.ink.500');
+}
+.chat-step-spinner i:nth-child(2) { animation-delay: 0.16s; }
+.chat-step-spinner i:nth-child(3) { animation-delay: 0.32s; }
+@keyframes step-bounce {
+  0%, 80%, 100% { opacity: 0.35; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-1.5px); }
+}
+.chat-step-body {
+  @apply flex min-w-0 flex-col gap-0.5;
+}
+.chat-step-label {
+  @apply truncate;
+}
+.chat-step-sources {
+  @apply flex flex-wrap gap-x-2 gap-y-0.5;
+}
+.chat-step-source {
+  @apply max-w-[24ch] truncate text-[11px] text-ink-400 underline decoration-ink-300 underline-offset-2 hover:text-accent-600 hover:decoration-accent-400 dark:text-ink-500 dark:decoration-ink-700 dark:hover:text-accent-300;
+}
+
+/* Suggested follow-ups, docked just above the composer. */
+.composer-followups {
+  @apply mb-2 flex flex-wrap gap-1.5;
+}
+.composer-followup-chip {
+  @apply rounded-full px-2.5 py-1 text-left text-[12px] text-ink-600 ring-1 ring-ink-200 transition hover:bg-accent-50 hover:text-accent-700 hover:ring-accent-300 dark:text-ink-300 dark:ring-ink-700 dark:hover:bg-ink-800 dark:hover:text-accent-300 dark:hover:ring-accent-500;
   background: white;
 }
-html.dark .followup-chip {
+html.dark .composer-followup-chip {
   background: theme('colors.ink.900');
 }
 
@@ -2478,88 +2556,6 @@ html.dark .stream-caret {
 @keyframes caret-blink {
   0%, 49% { opacity: 1; }
   50%, 100% { opacity: 0; }
-}
-
-/* Partial sources hint */
-.partial-sources {
-  @apply mt-2 flex flex-wrap items-center gap-1.5 text-[11px] italic text-ink-500 dark:text-ink-400;
-}
-.partial-sources-title {
-  @apply font-sans uppercase not-italic tracking-[0.06em] text-[10px];
-}
-.partial-sources-list {
-  @apply flex flex-wrap gap-1;
-}
-.partial-source-chip {
-  @apply inline-flex max-w-[14ch] truncate rounded-full bg-ink-200/60 px-2 py-px text-[10.5px] not-italic text-ink-600 dark:bg-ink-700 dark:text-ink-200;
-}
-
-/* Auto-triggered web search badge */
-.web-auto-badge {
-  @apply mt-2 inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10.5px] font-sans uppercase font-semibold tracking-[0.06em];
-  background: theme('colors.accent.50');
-  color: theme('colors.accent.700');
-  border: 1px solid theme('colors.accent.200');
-}
-html.dark .web-auto-badge {
-  background: rgba(217, 119, 6, 0.14);
-  color: theme('colors.accent.200');
-  border-color: theme('colors.accent.800');
-}
-
-/* Live activity indicator (thinking / searching web / writing) */
-.thinking {
-  @apply inline-flex items-center gap-2 text-[13px] text-ink-500 dark:text-ink-400;
-}
-.thinking-dots {
-  @apply inline-flex items-center gap-1;
-}
-.thinking-dots i {
-  @apply inline-block h-1.5 w-1.5 rounded-full;
-  background: theme('colors.accent.500');
-  animation: thinking-bounce 1.2s ease-in-out infinite;
-}
-.thinking-dots i:nth-child(2) { animation-delay: 0.2s; }
-.thinking-dots i:nth-child(3) { animation-delay: 0.4s; }
-html.dark .thinking-dots i { background: theme('colors.accent.300'); }
-@keyframes thinking-bounce {
-  0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
-  40% { opacity: 1; transform: translateY(-2px); }
-}
-
-/* Visible web-search step (the model called the web_search tool) */
-.web-step {
-  @apply mt-2 inline-flex max-w-full items-start gap-2 rounded-lg px-2.5 py-1.5 text-[12px];
-  background: theme('colors.accent.50');
-  border: 1px solid theme('colors.accent.200');
-}
-html.dark .web-step {
-  background: rgba(217, 119, 6, 0.12);
-  border-color: theme('colors.accent.800');
-}
-.web-step--running {
-  animation: web-step-pulse 1.4s ease-in-out infinite;
-}
-@keyframes web-step-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.55; }
-}
-.web-step-icon {
-  @apply leading-none;
-}
-.web-step-body {
-  @apply flex min-w-0 flex-col gap-0.5;
-}
-.web-step-label {
-  @apply font-sans text-[10.5px] font-semibold uppercase tracking-[0.06em];
-  color: theme('colors.accent.700');
-}
-html.dark .web-step-label {
-  color: theme('colors.accent.200');
-}
-.web-step-query {
-  @apply truncate text-ink-600 dark:text-ink-300;
-  max-width: 42ch;
 }
 
 /* Tool call cards */

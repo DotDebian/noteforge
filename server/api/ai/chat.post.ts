@@ -559,95 +559,16 @@ export default defineEventHandler(async (event) => {
     .map(h => ({ role: h.role as 'user' | 'assistant', content: decryptChatMessageContent(h.content, dek) }))
     .slice(-HISTORY_MAX)
 
-  /* ---------- 4. Rewrite the retrieval query ----------------------------- */
-  const rewriterUsed = historyMessages.length > 0
-  const retrievalQuery = await rewriteQuery(historyMessages, input.message, user.id)
-
-  /* ---------- 5. Retrieve context ---------------------------------------- */
-  const queryVectors = await mistralEmbed([retrievalQuery], { userId: user.id, operation: 'embed_query' })
-  const queryVec = queryVectors[0] ?? []
-
-  const docFilters = effectiveDocId != null
-    ? and(
-      eq(documents.workspaceId, input.workspaceId),
-      eq(documents.id, effectiveDocId),
-      activeDocsWhere(),
-    )
-    : effectiveFolderId != null
-      ? and(
-        eq(documents.workspaceId, input.workspaceId),
-        eq(documents.folderId, effectiveFolderId),
-        activeDocsWhere(),
-      )
-      : and(eq(documents.workspaceId, input.workspaceId), activeDocsWhere())
-
-  const candidateDocs = await db
-    .select({ id: documents.id, title: documents.title, updatedAt: documents.updatedAt })
-    .from(documents)
-    .where(docFilters)
-
-  const titleByDoc = new Map(
-    candidateDocs.map(d => [d.id, decryptDocument({ title: d.title }, workspaceKey).title!] as const),
-  )
-  const updatedAtByDoc = new Map<number, number>(
-    candidateDocs.map((d) => {
-      const ts = d.updatedAt instanceof Date ? Math.floor(d.updatedAt.getTime() / 1000) : Number(d.updatedAt ?? 0)
-      return [d.id, ts] as const
-    }),
-  )
-  const candidateDocIds = candidateDocs.map(d => d.id)
-
-  const noteSources: SourceRef[] = []
-  let rerankerUsed = false
-  let rerankScoreAvg: number | undefined
-  if (candidateDocIds.length > 0) {
-    const scored = await rankChunks(candidateDocIds, queryVec, {
-      perDocCap: Number.POSITIVE_INFINITY,
-      topK: RERANK_POOL,
-      queryText: retrievalQuery,
-    }, workspaceKey)
-
-    const rerankerSkipped = scored.length <= 1 || getRerankerCircuitOpen()
-    rerankerUsed = !rerankerSkipped
-    const reranked = await rerankChunks(retrievalQuery, scored, SEARCH_TOP_K * 2, user.id)
-    if (reranked.length > 0) {
-      let sum = 0
-      for (const r of reranked) sum += r.score
-      rerankScoreAvg = sum / reranked.length
-    }
-
-    const finalCap = effectiveDocId != null ? Number.POSITIVE_INFINITY : 2
-    const seenPerDoc = new Map<number, number>()
-    for (const hit of reranked) {
-      if (noteSources.length >= SEARCH_TOP_K) break
-      const used = seenPerDoc.get(hit.docId) ?? 0
-      if (used >= finalCap) continue
-      seenPerDoc.set(hit.docId, used + 1)
-      noteSources.push({
-        docId: hit.docId,
-        chunkIdx: hit.idx,
-        snippet: truncate(hit.text, SOURCE_SNIPPET_MAX),
-        title: titleByDoc.get(hit.docId) ?? 'Untitled',
-        docUpdatedAt: updatedAtByDoc.get(hit.docId),
-      })
-    }
-  }
-
-  /* ---------- 5b. Web search availability (Tavily tool) ------------------ */
-  // Web search is exposed to the model as a `web_search` function tool and is
-  // available on every turn when a Tavily key is configured ("enabled by
-  // default"). The MODEL decides whether to call it ("used if needed"). The
-  // persistent `webFallback` toggle, when on, FORCES the search this turn.
-  // The actual Tavily call happens inside the streaming loop (step 7), once we
-  // see the tool call — so `webSources` / `webDebug` start empty here and are
-  // filled in mid-stream.
+  /* ---------- 4. Web search availability (Tavily tool) ------------------- */
+  // Query rewriting + note retrieval now run INSIDE the SSE stream (step 7) so
+  // the client can render genuine "Réflexion → Recherche dans les notes →
+  // Recherche web" step frames with real running/done timing. The web search,
+  // as before, is exposed to the model as a `web_search` function tool: it is
+  // available whenever a Tavily key is configured (the MODEL decides to call
+  // it; the persistent `webFallback` toggle FORCES it this turn).
   const webEnabled = typeof (useRuntimeConfig().tavilyApiKey) === 'string'
     && (useRuntimeConfig().tavilyApiKey as string).length > 0
   const forceWeb = input.webFallback === true && webEnabled
-
-  const webSources: WebSourceRef[] = []
-  let webDebug: WebSearchDebug | null = null
-  let sources: AnySource[] = [...noteSources]
 
   /* ---------- 6. Build the prompt ---------------------------------------- */
   // The CONTEXT block is rebuilt whenever the source pool changes (e.g. after
@@ -688,7 +609,6 @@ export default defineEventHandler(async (event) => {
   }
 
   const initialCapabilityClause = webEnabled ? SYSTEM_PROMPT_WEB_AVAILABLE : SYSTEM_PROMPT_WEB_OFF
-  const messages: MistralMessage[] = composeMessages(initialCapabilityClause, sources)
 
   /* ---------- 6b. Model routing ------------------------------------------ */
   // Vision wins when an image is in play and the caller didn't pin a model.
@@ -722,18 +642,6 @@ export default defineEventHandler(async (event) => {
   const userId = user.id
   const allowWrites = input.allowWrites === true
 
-  // Shape sources for the early `partial_sources` frame (N9). The client
-  // renders these under the streaming assistant bubble while the model is
-  // still talking; the `done` frame later replaces them with the cited list.
-  const partialSourcesForClient = sources.map(s => ({
-    docId: s.docId,
-    chunkIdx: s.chunkIdx,
-    title: s.title,
-    snippet: s.snippet,
-    ...('url' in s ? { kind: 'web' as const, url: s.url } : { kind: 'note' as const }),
-    ...((s as SourceRef).docUpdatedAt !== undefined ? { docUpdatedAt: (s as SourceRef).docUpdatedAt } : {}),
-  }))
-
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const enc = new TextEncoder()
@@ -751,13 +659,111 @@ export default defineEventHandler(async (event) => {
       // frame's web badge.
       let webUsed = false
 
-      // N9 — emit the working source list early so the UI can render a
-      // "searching X, Y, Z" hint while the model still types. We deliberately
-      // ship the full retrieval (uncited yet) here; the `done` frame below
-      // narrows it down to the truly cited subset.
-      if (partialSourcesForClient.length > 0) {
-        send({ type: 'partial_sources', sources: partialSourcesForClient })
+      // ---- Steps 1 & 2: Réflexion (query rewrite) + Recherche dans les notes
+      // These ran before the stream historically. Doing them here lets us emit
+      // real running/done `step` frames the UI renders ABOVE the answer, so the
+      // user sees "Réflexion… → terminée", "Recherche dans les notes… → N notes
+      // trouvées" with genuine timing. Web search (step 3) follows mid-stream.
+      let rewriterUsed = false
+      let retrievalQuery = userMessage
+      const noteSources: SourceRef[] = []
+      let rerankerUsed = false
+      let rerankScoreAvg: number | undefined
+      let sources: AnySource[] = []
+      const webSources: WebSourceRef[] = []
+      let webDebug: WebSearchDebug | null = null
+
+      send({ type: 'step', step: 'thinking', status: 'running' })
+      try {
+        rewriterUsed = historyMessages.length > 0
+        retrievalQuery = await rewriteQuery(historyMessages, input.message, userId)
+        send({ type: 'step', step: 'thinking', status: 'done' })
+
+        send({ type: 'step', step: 'notes', status: 'running' })
+        const queryVectors = await mistralEmbed([retrievalQuery], { userId, operation: 'embed_query' })
+        const queryVec = queryVectors[0] ?? []
+
+        const docFilters = effectiveDocId != null
+          ? and(
+            eq(documents.workspaceId, input.workspaceId),
+            eq(documents.id, effectiveDocId),
+            activeDocsWhere(),
+          )
+          : effectiveFolderId != null
+            ? and(
+              eq(documents.workspaceId, input.workspaceId),
+              eq(documents.folderId, effectiveFolderId),
+              activeDocsWhere(),
+            )
+            : and(eq(documents.workspaceId, input.workspaceId), activeDocsWhere())
+
+        const candidateDocs = await db
+          .select({ id: documents.id, title: documents.title, updatedAt: documents.updatedAt })
+          .from(documents)
+          .where(docFilters)
+
+        const titleByDoc = new Map(
+          candidateDocs.map(d => [d.id, decryptDocument({ title: d.title }, workspaceKey).title!] as const),
+        )
+        const updatedAtByDoc = new Map<number, number>(
+          candidateDocs.map((d) => {
+            const ts = d.updatedAt instanceof Date ? Math.floor(d.updatedAt.getTime() / 1000) : Number(d.updatedAt ?? 0)
+            return [d.id, ts] as const
+          }),
+        )
+        const candidateDocIds = candidateDocs.map(d => d.id)
+
+        if (candidateDocIds.length > 0) {
+          const scored = await rankChunks(candidateDocIds, queryVec, {
+            perDocCap: Number.POSITIVE_INFINITY,
+            topK: RERANK_POOL,
+            queryText: retrievalQuery,
+          }, workspaceKey)
+
+          const rerankerSkipped = scored.length <= 1 || getRerankerCircuitOpen()
+          rerankerUsed = !rerankerSkipped
+          const reranked = await rerankChunks(retrievalQuery, scored, SEARCH_TOP_K * 2, userId)
+          if (reranked.length > 0) {
+            let sum = 0
+            for (const r of reranked) sum += r.score
+            rerankScoreAvg = sum / reranked.length
+          }
+
+          const finalCap = effectiveDocId != null ? Number.POSITIVE_INFINITY : 2
+          const seenPerDoc = new Map<number, number>()
+          for (const hit of reranked) {
+            if (noteSources.length >= SEARCH_TOP_K) break
+            const used = seenPerDoc.get(hit.docId) ?? 0
+            if (used >= finalCap) continue
+            seenPerDoc.set(hit.docId, used + 1)
+            noteSources.push({
+              docId: hit.docId,
+              chunkIdx: hit.idx,
+              snippet: truncate(hit.text, SOURCE_SNIPPET_MAX),
+              title: titleByDoc.get(hit.docId) ?? 'Untitled',
+              docUpdatedAt: updatedAtByDoc.get(hit.docId),
+            })
+          }
+        }
+        sources = [...noteSources]
+        send({ type: 'step', step: 'notes', status: 'done', count: noteSources.length })
       }
+      catch (err) {
+        // Retrieval is failure-hard (no context = no useful answer). Stop the
+        // spinners and surface an error frame; the client renders the error
+        // bubble. Headers are already sent, so we can't fall back to HTTP 500.
+        const detail = (err as { data?: { detail?: string }, message?: string }).data?.detail
+          ?? (err as Error).message
+          ?? 'retrieval failed'
+        send({ type: 'step', step: 'thinking', status: 'done' })
+        send({ type: 'step', step: 'notes', status: 'done', count: 0 })
+        send({ type: 'error', error: 'retrieval_failed', detail })
+        controller.close()
+        return
+      }
+
+      // Build the prompt now that the note context is resolved.
+      const messages: MistralMessage[] = composeMessages(initialCapabilityClause, sources)
 
       // N8 — tool-call pre-flight. When the user toggled `allowWrites`, run a
       // non-streaming probe first to see if the model wants to call a write
@@ -882,7 +888,7 @@ export default defineEventHandler(async (event) => {
           if (!pendingWebQuery || webUsed) break
 
           webUsed = true
-          send({ type: 'tool_step', tool: 'web_search', status: 'running', query: truncate(pendingWebQuery, 200) })
+          send({ type: 'step', step: 'web', status: 'running', query: truncate(pendingWebQuery, 200) })
 
           const searchResult = await tavilySearch(pendingWebQuery, { maxResults: WEB_MAX_SOURCES })
           webDebug = searchResult.debug
@@ -908,19 +914,16 @@ export default defineEventHandler(async (event) => {
           }
           sources = [...noteSources, ...webSources]
 
-          // Surface the finished search + its sources to the client.
-          send({ type: 'tool_step', tool: 'web_search', status: 'done', query: truncate(pendingWebQuery, 200), hits: webSources.length })
-          if (webSources.length > 0) {
-            const webPartial = webSources.map(s => ({
-              docId: s.docId,
-              chunkIdx: s.chunkIdx,
-              title: s.title,
-              snippet: truncate(s.snippet, SOURCE_SNIPPET_MAX),
-              kind: 'web' as const,
-              url: s.url,
-            }))
-            send({ type: 'partial_sources', sources: [...partialSourcesForClient, ...webPartial] })
-          }
+          // Surface the finished search + its results (title + url) so the
+          // "Recherche web — N résultats" step can list the sources inline.
+          send({
+            type: 'step',
+            step: 'web',
+            status: 'done',
+            query: truncate(pendingWebQuery, 200),
+            count: webSources.length,
+            sources: webSources.map(s => ({ title: s.title, url: s.url })),
+          })
 
           // Recompose for pass 2: enriched CONTEXT + hit/miss guidance, no tools.
           const clause = webSources.length > 0 ? SYSTEM_PROMPT_WEB_ON_HIT : SYSTEM_PROMPT_WEB_ON_MISS
