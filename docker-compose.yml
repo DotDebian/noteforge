@@ -13,6 +13,9 @@ services:
       NUXT_SESSION_PASSWORD: ${NUXT_SESSION_PASSWORD:?NUXT_SESSION_PASSWORD is required (>= 32 chars)}
       MISTRAL_CHAT_MODEL: ${MISTRAL_CHAT_MODEL:-mistral-medium-latest}
       MISTRAL_EMBED_MODEL: ${MISTRAL_EMBED_MODEL:-mistral-embed}
+      # Optional — powers the chat's `web_search` tool. Left empty disables web
+      # search gracefully (the tool isn't offered, chat still answers from notes).
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
       DATABASE_URL: /app/data/noteforge.db
     volumes:
       # Bind-mount the host's data/ directory so the SQLite DB + WAL files
