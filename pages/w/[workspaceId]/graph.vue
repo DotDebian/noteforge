@@ -196,10 +196,9 @@ function ensureSims() {
      - Repulsion: O(n²) Coulomb-like between every visible pair.
      - Attraction: spring along visible edges (link edges 2× stronger).
      - Gravity to canvas center.
-   Stops when total kinetic energy < threshold for several frames. */
+   Cools via a decaying `alpha` (see below) so the layout always settles. */
 
-const KE_STOP = 0.5
-const MAX_VEL = 30
+const MAX_VEL = 20
 const REPULSION = 1500
 const SPRING_LINK = 0.025
 const SPRING_SIMILAR = 0.02
@@ -207,9 +206,17 @@ const SPRING_TAG = 0.012
 const SPRING_REST = 80
 const GRAVITY = 0.012
 const DAMP = 0.85
+// Cooling (d3-force style): every force is scaled by `alpha`, which decays
+// toward 0 each tick. This is what guarantees the layout settles — without it a
+// densely-connected graph (e.g. hundreds of shared-tag edges, all wanting the
+// same SPRING_REST) stays geometrically frustrated and oscillates at clamp
+// velocity until the hard time cap. With cooling, motion decays smoothly to
+// rest in ~3s regardless of edge density.
+const ALPHA_DECAY = 0.025
+const ALPHA_MIN = 0.01
 
-let lowEnergyFrames = 0
-let energyExpiresAt = 0 // hard cap: don't sim forever
+let alpha = 1
+let energyExpiresAt = 0 // hard cap: never sim forever even if something reheats it
 
 function step() {
   if (!containerEl.value) return
@@ -221,6 +228,9 @@ function step() {
   const visibleIds = filteredNodeIds.value
   const visibleSims: Sim[] = []
   for (const s of sims.value.values()) if (visibleIds.has(s.id)) visibleSims.push(s)
+
+  // Cool the system toward rest — all forces below are scaled by this.
+  alpha += (0 - alpha) * ALPHA_DECAY
 
   // Repulsion
   for (let i = 0; i < visibleSims.length; i++) {
@@ -234,8 +244,8 @@ function step() {
       const d = Math.sqrt(d2)
       // F = k / d²; spread over distance for direction.
       const f = REPULSION / d2
-      const fx = (dx / d) * f
-      const fy = (dy / d) * f
+      const fx = (dx / d) * f * alpha
+      const fy = (dy / d) * f * alpha
       a.vx -= fx
       a.vy -= fy
       b.vx += fx
@@ -257,8 +267,8 @@ function step() {
         ? SPRING_SIMILAR * (e.weight ?? 0.8)
         : SPRING_TAG
     const displ = d - SPRING_REST
-    const fx = (dx / d) * displ * k
-    const fy = (dy / d) * displ * k
+    const fx = (dx / d) * displ * k * alpha
+    const fy = (dy / d) * displ * k * alpha
     a.vx += fx
     a.vy += fy
     b.vx -= fx
@@ -266,10 +276,9 @@ function step() {
   }
 
   // Gravity + integrate
-  let energy = 0
   for (const s of visibleSims) {
-    s.vx += (cx - s.x) * GRAVITY
-    s.vy += (cy - s.y) * GRAVITY
+    s.vx += (cx - s.x) * GRAVITY * alpha
+    s.vy += (cy - s.y) * GRAVITY * alpha
     s.vx *= DAMP
     s.vy *= DAMP
     // Velocity clamp keeps the sim stable even when nodes start very close.
@@ -279,16 +288,12 @@ function step() {
     if (s.vy < -MAX_VEL) s.vy = -MAX_VEL
     s.x += s.vx
     s.y += s.vy
-    energy += s.vx * s.vx + s.vy * s.vy
   }
-
-  // Stop when settled.
-  if (energy < KE_STOP) lowEnergyFrames++
-  else lowEnergyFrames = 0
 
   draw()
 
-  if (lowEnergyFrames > 30 || performance.now() > energyExpiresAt) {
+  // Settled once cooled (or the hard cap fires) — freeze the layout.
+  if (alpha < ALPHA_MIN || performance.now() > energyExpiresAt) {
     rafId = null
     return
   }
@@ -394,8 +399,9 @@ function draw() {
 }
 
 function restartSim() {
-  lowEnergyFrames = 0
-  energyExpiresAt = performance.now() + 6000
+  // Reheat: alpha back to 1 so the layout re-settles from the current positions.
+  alpha = 1
+  energyExpiresAt = performance.now() + 8000
   if (rafId == null) rafId = requestAnimationFrame(step)
 }
 
