@@ -66,6 +66,9 @@ const L = {
   showTags: 'Afficher les tags partagés',
   showSimilar: 'Afficher les notes similaires',
   selected: 'Sélectionné :',
+  settings: 'Réglages',
+  simMin: 'Similarité min',
+  tagMin: 'Tags partagés min',
   rootGroup: 'Racine',
   untitled: 'Sans titre',
   stats: (n: number, e: number) => `${n} notes · ${e} liens`,
@@ -101,6 +104,10 @@ const selectedNodeId = ref<number | null>(null)
 const isolated = ref(false)
 const showTagEdges = ref(true)
 const showSimilarEdges = ref(true)
+// Edge thresholds: similar edges below this cosine % and tag edges below this
+// shared-tag count are hidden (visual filter only — layout is unchanged).
+const minSimilarPct = ref(78)
+const minSharedTags = ref(1)
 
 const allTags = computed<string[]>(() => {
   const s = new Set<string>()
@@ -170,11 +177,24 @@ function colorOf(group: string): string {
   return palette.value.colorByGroup.get(group) ?? ROOT_COLOR
 }
 
+// Visibility predicate shared by drawing, the link count, and isolate — so the
+// threshold sliders, type toggles, and stats all agree.
+function linkVisible(l: SimLink): boolean {
+  if (l.kind === 'tag') return showTagEdges.value && (l.weight ?? 1) >= minSharedTags.value
+  if (l.kind === 'similar') return showSimilarEdges.value && (l.weight ?? 0) * 100 >= minSimilarPct.value
+  return true
+}
+
+const maxSharedTags = computed(() => {
+  void graphVersion.value
+  let m = 1
+  for (const l of simLinks) if (l.kind === 'tag') m = Math.max(m, l.weight ?? 1)
+  return m
+})
+
 const drawnLinkCount = computed(() => {
   void graphVersion.value
-  return simLinks.filter(l =>
-    l.kind === 'tag' ? showTagEdges.value : l.kind === 'similar' ? showSimilarEdges.value : true,
-  ).length
+  return simLinks.filter(linkVisible).length
 })
 
 // Doc ids to keep lit; `null` means everything is lit (no filter / isolate).
@@ -192,6 +212,7 @@ const highlightIds = computed<Set<number> | null>(() => {
     const sel = selectedNodeId.value!
     const keep = new Set<number>([sel])
     for (const l of simLinks) {
+      if (!linkVisible(l)) continue
       const s = endId(l.source)
       const t = endId(l.target)
       if (s === sel) keep.add(t)
@@ -336,28 +357,30 @@ function draw() {
   // Edges.
   ctx.lineCap = 'round'
   for (const l of simLinks) {
-    if (l.kind === 'tag' && !showTagEdges.value) continue
-    if (l.kind === 'similar' && !showSimilarEdges.value) continue
+    if (!linkVisible(l)) continue
     const a = l.source as SimNode
     const b = l.target as SimNode
     if (a.x == null || b.x == null) continue
     const onSel = sel != null && (a.id === sel || b.id === sel)
     const dim = !(lit(a.id) && lit(b.id)) && !onSel
     if (l.kind === 'link') {
+      // Markdown links are binary (no weight) — fixed weight.
       ctx.strokeStyle = onSel ? '#f59e0b' : withAlpha('#d97706', dim ? 0.1 : 0.8)
-      ctx.lineWidth = onSel ? 2 : 1.5
+      ctx.lineWidth = onSel ? 2.2 : 1.6
       ctx.setLineDash([])
     }
     else if (l.kind === 'similar') {
-      const weight = l.weight ?? 0.8
-      const alpha = Math.max(0.3, Math.min(0.8, 0.3 + (weight - 0.78) * 1.8))
-      ctx.strokeStyle = onSel ? '#34d399' : withAlpha('#10b981', dim ? 0.08 : alpha)
-      ctx.lineWidth = onSel ? 1.8 : 1.1
+      // Width + opacity scale with cosine (0.78 floor → 1.0).
+      const t = Math.max(0, Math.min(1, ((l.weight ?? 0.78) - 0.78) / 0.22))
+      ctx.strokeStyle = onSel ? '#34d399' : withAlpha('#10b981', dim ? 0.08 : 0.3 + t * 0.5)
+      ctx.lineWidth = onSel ? 2.6 : 0.8 + t * 2.4
       ctx.setLineDash([])
     }
     else {
-      ctx.strokeStyle = onSel ? '#c084fc' : withAlpha('#a855f7', dim ? 0.07 : 0.4)
-      ctx.lineWidth = onSel ? 1.5 : 0.8
+      // Width scales with shared-tag count.
+      const count = l.weight ?? 1
+      ctx.strokeStyle = onSel ? '#c084fc' : withAlpha('#a855f7', dim ? 0.07 : 0.42)
+      ctx.lineWidth = onSel ? 2 : Math.min(3, 0.7 + (count - 1) * 0.6)
       ctx.setLineDash([3, 3])
     }
     ctx.beginPath()
@@ -520,7 +543,7 @@ function zoomOut() { zoom.value = Math.max(0.2, zoom.value / 1.2); draw() }
 
 // Data change → rebuild simulation. View / filter change → redraw only.
 watch(data, () => buildSim())
-watch([filterTag, isolated, showTagEdges, showSimilarEdges, isDark], () => draw())
+watch([filterTag, isolated, showTagEdges, showSimilarEdges, minSimilarPct, minSharedTags, isDark], () => draw())
 
 onMounted(() => {
   buildSim()
@@ -588,6 +611,22 @@ const wsName = computed(() => workspacesStore.current?.name ?? 'Workspace')
         <div class="control control--row">
           <button type="button" class="ghost-btn" @click="reset">{{ L.reset }}</button>
           <button type="button" class="ghost-btn" @click="reshuffle">{{ L.reshuffle }}</button>
+        </div>
+
+        <div class="settings">
+          <span class="settings-title">{{ L.settings }}</span>
+          <div class="control">
+            <label class="filter-label range-label">
+              {{ L.simMin }}<span class="range-val">{{ minSimilarPct }}%</span>
+            </label>
+            <input v-model.number="minSimilarPct" type="range" min="78" max="99" step="1" class="range">
+          </div>
+          <div v-if="maxSharedTags > 1" class="control">
+            <label class="filter-label range-label">
+              {{ L.tagMin }}<span class="range-val">{{ minSharedTags }}</span>
+            </label>
+            <input v-model.number="minSharedTags" type="range" min="1" :max="maxSharedTags" step="1" class="range">
+          </div>
         </div>
 
         <div v-if="selectedNode" class="control">
@@ -720,6 +759,24 @@ html.dark .ghost-btn:hover {
   background: theme('colors.ink.800');
   color: theme('colors.ink.50');
   border-color: theme('colors.ink.700');
+}
+
+.settings {
+  @apply flex flex-col gap-2 mb-4 pt-4 border-t border-ink-200/40;
+}
+html.dark .settings { border-top-color: theme('colors.ink.800' / 50%); }
+.settings-title {
+  @apply label-mono mb-1;
+}
+.range-label {
+  @apply flex items-center justify-between;
+}
+.range-val {
+  @apply font-sans text-[11px] font-semibold text-ink-700 dark:text-ink-200 tabular-nums normal-case tracking-normal;
+}
+.range {
+  @apply w-full cursor-pointer;
+  accent-color: theme('colors.accent.500');
 }
 
 .selected-link {
