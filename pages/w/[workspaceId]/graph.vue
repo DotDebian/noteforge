@@ -11,8 +11,9 @@ interface GraphNode {
 interface GraphEdge {
   source: number
   target: number
-  kind: 'link' | 'tag'
+  kind: 'link' | 'tag' | 'similar'
   tag?: string
+  weight?: number
 }
 interface GraphResponse { nodes: GraphNode[], edges: GraphEdge[] }
 
@@ -31,6 +32,9 @@ const L = {
   unisolate: 'Annuler l\'isolement',
   legendLinks: 'Liens markdown',
   legendTags: 'Tags partagés',
+  legendSimilar: 'Notes similaires',
+  showTags: 'Afficher les tags partagés',
+  showSimilar: 'Afficher les notes similaires',
   selected: 'Sélectionné :',
   stats: (n: number, e: number) => `${n} notes · ${e} arêtes`,
 }
@@ -81,6 +85,10 @@ function colorForNode(n: GraphNode): string {
 const filterTag = ref<string>('')
 const selectedNodeId = ref<number | null>(null)
 const isolated = ref(false)
+// Edge-kind visibility. `link` edges are always shown (explicit, authored);
+// tag + similarity edges are inferred and can be toggled off to declutter.
+const showTagEdges = ref(true)
+const showSimilarEdges = ref(true)
 
 const filteredNodeIds = computed<Set<number>>(() => {
   if (!filterTag.value && (!isolated.value || selectedNodeId.value == null)) {
@@ -110,8 +118,28 @@ const filteredNodeIds = computed<Set<number>>(() => {
 
 const filteredEdges = computed<GraphEdge[]>(() => {
   const ok = filteredNodeIds.value
-  return edges.value.filter(e => ok.has(e.source) && ok.has(e.target))
+  return edges.value.filter((e) => {
+    if (e.kind === 'tag' && !showTagEdges.value) return false
+    if (e.kind === 'similar' && !showSimilarEdges.value) return false
+    return ok.has(e.source) && ok.has(e.target)
+  })
 })
+
+/* ---------- Node degree (drives radius — more connected = bigger) ---------- */
+const degreeById = computed<Map<number, number>>(() => {
+  const m = new Map<number, number>()
+  for (const e of filteredEdges.value) {
+    m.set(e.source, (m.get(e.source) ?? 0) + 1)
+    m.set(e.target, (m.get(e.target) ?? 0) + 1)
+  }
+  return m
+})
+
+function radiusForId(id: number): number {
+  const deg = degreeById.value.get(id) ?? 0
+  // 5px base, growing with sqrt(degree), capped so hubs don't dominate.
+  return Math.min(12, 5 + Math.sqrt(deg) * 1.7)
+}
 
 /* ---------- Canvas + simulation ---------- */
 interface Sim {
@@ -174,6 +202,7 @@ const KE_STOP = 0.5
 const MAX_VEL = 30
 const REPULSION = 1500
 const SPRING_LINK = 0.025
+const SPRING_SIMILAR = 0.02
 const SPRING_TAG = 0.012
 const SPRING_REST = 80
 const GRAVITY = 0.012
@@ -222,7 +251,11 @@ function step() {
     const dx = b.x - a.x
     const dy = b.y - a.y
     const d = Math.sqrt(dx * dx + dy * dy) || 0.01
-    const k = e.kind === 'link' ? SPRING_LINK : SPRING_TAG
+    const k = e.kind === 'link'
+      ? SPRING_LINK
+      : e.kind === 'similar'
+        ? SPRING_SIMILAR * (e.weight ?? 0.8)
+        : SPRING_TAG
     const displ = d - SPRING_REST
     const fx = (dx / d) * displ * k
     const fy = (dy / d) * displ * k
@@ -295,6 +328,13 @@ function draw() {
       ctx.strokeStyle = highlight ? '#b54a18' : 'rgba(120, 113, 108, 0.45)'
       ctx.lineWidth = highlight ? 1.4 : 0.9
     }
+    else if (e.kind === 'similar') {
+      // Semantic similarity — solid emerald, opacity scaled by cosine weight.
+      const w = e.weight ?? 0.8
+      const alpha = highlight ? 0.85 : 0.1 + (w - 0.78) * 1.4
+      ctx.strokeStyle = `rgba(16, 185, 129, ${Math.max(0.1, Math.min(0.6, alpha))})`
+      ctx.lineWidth = highlight ? 1.2 : 0.7
+    }
     else {
       ctx.strokeStyle = highlight ? 'rgba(124, 58, 237, 0.7)' : 'rgba(124, 58, 237, 0.18)'
       ctx.lineWidth = highlight ? 1.1 : 0.5
@@ -315,7 +355,8 @@ function draw() {
     if (!node) continue
     const isHover = hoverId.value === s.id
     const isSelected = sel === s.id
-    const r = isSelected ? 9 : isHover ? 8 : s.r
+    const base = radiusForId(s.id)
+    const r = isSelected ? base + 3 : isHover ? base + 2 : base
     ctx.beginPath()
     ctx.arc(s.x, s.y, r, 0, Math.PI * 2)
     ctx.fillStyle = colorForNode(node)
@@ -380,7 +421,7 @@ function hitTest(x: number, y: number): number | null {
     if (!filteredNodeIds.value.has(s.id)) continue
     const dx = x - s.x
     const dy = y - s.y
-    if (dx * dx + dy * dy <= (s.r + 4) ** 2) return s.id
+    if (dx * dx + dy * dy <= (radiusForId(s.id) + 4) ** 2) return s.id
   }
   return null
 }
@@ -475,7 +516,7 @@ function onWheel(e: WheelEvent) {
 function zoomIn() { zoom.value = Math.min(4, zoom.value * 1.2); draw() }
 function zoomOut() { zoom.value = Math.max(0.2, zoom.value / 1.2); draw() }
 
-watch([nodes, edges, filterTag, isolated], () => {
+watch([nodes, edges, filterTag, isolated, showTagEdges, showSimilarEdges], () => {
   ensureSims()
   restartSim()
 })
@@ -570,9 +611,14 @@ const wsName = computed(() => workspacesStore.current?.name ?? 'Workspace')
           <div class="legend-row">
             <span class="legend-line legend-line--link" /> <span>{{ L.legendLinks }}</span>
           </div>
-          <div class="legend-row">
+          <label class="legend-row legend-toggle" :title="L.showSimilar">
+            <input v-model="showSimilarEdges" type="checkbox" class="legend-check">
+            <span class="legend-line legend-line--similar" /> <span>{{ L.legendSimilar }}</span>
+          </label>
+          <label class="legend-row legend-toggle" :title="L.showTags">
+            <input v-model="showTagEdges" type="checkbox" class="legend-check">
             <span class="legend-line legend-line--tag" /> <span>{{ L.legendTags }}</span>
-          </div>
+          </label>
         </div>
 
         <div v-if="allTags.length > 0" class="legend">
@@ -692,10 +738,20 @@ html.dark .legend { border-top-color: theme('colors.ink.800' / 50%); }
   @apply inline-block w-5 h-0.5 rounded-full;
 }
 .legend-line--link { background: rgba(120, 113, 108, 0.7); height: 2px; }
+.legend-line--similar { background: rgba(16, 185, 129, 0.7); height: 2px; }
 .legend-line--tag {
   background: linear-gradient(to right, rgba(124,58,237,0.45) 50%, transparent 50%);
   background-size: 5px 100%;
   height: 1.5px;
+}
+.legend-toggle {
+  @apply cursor-pointer select-none;
+}
+.legend-check {
+  width: 13px;
+  height: 13px;
+  accent-color: theme('colors.accent.500');
+  flex-shrink: 0;
 }
 .legend-dot {
   @apply inline-block w-2.5 h-2.5 rounded-full;
