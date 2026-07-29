@@ -4,7 +4,10 @@
  * bailing — UI gets a per-doc error list back and can show partial failure.
  *
  * Supported actions:
- *   - move(folderId | null) — change folderId for each doc
+ *   - move(folderId | null, workspaceId?) — relocate each doc. `workspaceId`
+ *     (omitted = keep the doc's own) allows moving ACROSS workspaces, which
+ *     re-encrypts the note under the destination workspace key — see
+ *     `server/utils/move.ts`.
  *   - trash — soft-delete each doc (idempotent)
  *   - tag-add(tag) — append `tag` to `doc_analyses.tags`; docs without an
  *     analysis row are skipped (we don't fabricate an empty analysis).
@@ -17,7 +20,7 @@
  * valid as long as it resolves to at least one note.
  *
  * Body shape (zod):
- *   { action, docIds?, folderIds?, folderId?, tag? }
+ *   { action, docIds?, folderIds?, folderId?, workspaceId?, tag? }
  */
 import { Readable } from 'node:stream'
 import archiver from 'archiver'
@@ -37,13 +40,14 @@ import {
   encryptAnalysis,
 } from '~/server/utils/encrypted-entities'
 import { buildHtml, slugify } from '~/server/utils/export'
+import { assertMoveTarget, moveUserDocument } from '~/server/utils/move'
 import {
   analyzeUserDocument,
   collectActiveDocIdsInFolders,
   softDeleteUserDocument,
-  updateUserDocument,
 } from '~/server/utils/notes'
 import { requireUser } from '~/server/utils/require-user'
+import type { WorkspaceKeyCache } from '~/server/utils/workspace-key'
 
 /** Upper bound on the resolved doc set (docs + folder expansion) per call. */
 const MAX_BULK_DOCS = 1000
@@ -55,12 +59,18 @@ const Body = z.object({
   folderIds: z.array(z.number().int().positive()).max(200).optional().default([]),
   // Move target (NOT a selection) — kept singular and distinct from `folderIds`.
   folderId: z.number().int().positive().nullable().optional(),
+  // Move target workspace. Omitted = each doc keeps its own workspace.
+  workspaceId: z.number().int().positive().optional(),
   tag: z.string().trim().min(1).max(80).optional(),
 })
 
 interface BulkResult {
   ok: number[]
   errors: { docId: number, message: string }[]
+  /** move only — destination workspace, echoed so the UI can refresh it. */
+  workspaceId?: number
+  /** move only — public share links revoked by a cross-workspace re-key. */
+  revokedShareTokens?: number
 }
 
 export default defineEventHandler(async (event) => {
@@ -149,15 +159,34 @@ export default defineEventHandler(async (event) => {
     if (input.folderId === undefined) {
       throw createError({ statusCode: 400, statusMessage: 'folderId is required for move' })
     }
-    if (input.folderId !== null) {
-      // Pre-check folder ownership; if forbidden, fail loudly (one folder for
-      // all docs — no partial-move semantics make sense here).
-      await assertFolderOwnership(user.id, input.folderId)
+    const targetFolderId = input.folderId ?? null
+
+    // Pre-check the destination once; if it's forbidden or inconsistent, fail
+    // loudly (one destination for all docs — no partial-move semantics make
+    // sense here). Without an explicit workspace the destination is per-doc,
+    // so only the folder can be validated up front.
+    if (input.workspaceId !== undefined) {
+      await assertMoveTarget(user.id, input.workspaceId, targetFolderId)
     }
-    const result: BulkResult = { ok: [], errors: [] }
+    else if (targetFolderId !== null) {
+      await assertFolderOwnership(user.id, targetFolderId)
+    }
+
+    // Share the per-request key cache across every doc so a shared workspace's
+    // WEK is unwrapped once, not once per note.
+    const keyCache = (event.context as unknown) as WorkspaceKeyCache
+    const result: BulkResult = { ok: [], errors: [], revokedShareTokens: 0 }
+    if (input.workspaceId !== undefined) result.workspaceId = input.workspaceId
     for (const id of ids) {
       try {
-        await updateUserDocument(user.id, id, { folderId: input.folderId ?? null }, dek)
+        const moved = await moveUserDocument(
+          user.id,
+          id,
+          { workspaceId: input.workspaceId ?? null, folderId: targetFolderId },
+          dek,
+          keyCache,
+        )
+        result.revokedShareTokens = (result.revokedShareTokens ?? 0) + moved.revokedShareTokens
         result.ok.push(id)
       }
       catch (err) {

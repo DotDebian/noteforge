@@ -59,10 +59,11 @@ const L = {
   analyzeConfirmTitle: 'Réanalyser & réindexer la sélection ?',
   analyzeConfirmBody: 'NoteForge va contacter Mistral pour chaque note sélectionnée — y compris toutes les notes des dossiers cochés (analyse + réindexation). Cela peut prendre plusieurs dizaines de secondes.',
   analyzeConfirmYes: 'Réanalyser',
-  movePromptTitle: 'Déplacer vers…',
-  movePromptMessage: 'Entrez l\'ID du dossier ou « racine » pour la racine.',
-  movePromptPlaceholder: 'ex. 12 · racine',
-  movePromptConfirm: 'Déplacer',
+  moveDoneTitle: 'Déplacement terminé',
+  movePartial: (ok: number, ko: number) => `${ok} note(s) déplacée(s), ${ko} en échec.`,
+  moveRevoked: (n: number) => n === 1
+    ? '1 lien public a été révoqué (rechiffrement).'
+    : `${n} liens publics ont été révoqués (rechiffrement).`,
   tagPromptTitle: 'Ajouter un tag aux notes sélectionnées',
   tagPromptPlaceholder: 'ex. réunions',
   tagPromptConfirm: 'Ajouter',
@@ -158,46 +159,52 @@ function onToggleBulk() {
 interface BulkResult {
   ok: number[]
   errors: { docId: number, message: string }[]
+  workspaceId?: number
+  revokedShareTokens?: number
 }
 
-async function onBulkMove() {
-  if (!current.value) return
-  const raw = await dialog.prompt({
-    title: L.movePromptTitle,
-    message: L.movePromptMessage,
-    placeholder: L.movePromptPlaceholder,
-    confirmLabel: L.movePromptConfirm,
-  })
-  if (raw == null) return
-  let folderId: number | null
-  const trimmed = raw.trim().toLowerCase()
-  if (trimmed === '' || trimmed === 'racine' || trimmed === 'root' || trimmed === 'null') {
-    folderId = null
-  }
-  else {
-    const n = Number(trimmed)
-    if (!Number.isInteger(n) || n <= 0) {
-      await dialog.alert({ title: L.bulkError, message: 'ID de dossier invalide.' })
-      return
-    }
-    folderId = n
-  }
+/* ---- Move: destination picked in <MoveToDialog>, applied here ---- */
+
+const moveOpen = ref(false)
+const moveBusy = ref(false)
+
+function onBulkMove() {
+  if (!bulkSelect.hasSelection) return
+  moveOpen.value = true
+}
+
+async function onMoveConfirm(target: { workspaceId: number, folderId: number | null }) {
+  if (!current.value || moveBusy.value) return
+  moveBusy.value = true
   try {
-    await $fetch<BulkResult>('/api/documents/bulk', {
+    const res = await $fetch<BulkResult>('/api/documents/bulk', {
       method: 'POST',
       body: {
         action: 'move',
         docIds: [...bulkSelect.selectedDocs],
         folderIds: [...bulkSelect.selectedFolders],
-        folderId,
+        folderId: target.folderId,
+        workspaceId: target.workspaceId,
       },
     })
-    // Reload tree to reflect new locations.
+    moveOpen.value = false
+    // Reload tree to reflect new locations (notes leaving the active
+    // workspace simply disappear from it).
     await treeStore.fetchWorkspaceTree(current.value.id, true)
     bulkSelect.exit()
+
+    const notes: string[] = []
+    if (res.errors.length > 0) notes.push(L.movePartial(res.ok.length, res.errors.length))
+    if (res.revokedShareTokens) notes.push(L.moveRevoked(res.revokedShareTokens))
+    if (notes.length > 0) {
+      await dialog.alert({ title: L.moveDoneTitle, message: notes.join(' ') })
+    }
   }
   catch (err) {
     await dialog.alert({ title: L.bulkError, message: (err as Error).message })
+  }
+  finally {
+    moveBusy.value = false
   }
 }
 
@@ -1059,6 +1066,13 @@ async function onRootDocDrop(e: DragEvent) {
       :workspace-name="current?.name ?? ''"
       :is-owner="current?.role === 'owner'"
       @close="shareOpen = false"
+    />
+    <MoveToDialog
+      :open="moveOpen"
+      :count="bulkSelect.totalCount"
+      :busy="moveBusy"
+      @close="moveOpen = false"
+      @confirm="onMoveConfirm"
     />
   </aside>
 </template>
