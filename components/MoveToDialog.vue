@@ -17,8 +17,15 @@ import { useWorkspacesStore } from '~/stores/workspaces'
 
 const props = defineProps<{
   open: boolean
-  /** How many notes the selection resolves to — shown in the lede. */
-  count: number
+  /** Notes selected on their own (those inside a selected folder travel with it). */
+  docCount: number
+  /** Folders selected — each moves with its whole subtree. */
+  folderCount: number
+  /**
+   * Folders being moved: they and their descendants are not valid
+   * destinations (a folder can't land inside itself).
+   */
+  excludeFolderIds?: number[]
   busy?: boolean
 }>()
 
@@ -30,9 +37,13 @@ const emit = defineEmits<{
 const L = {
   eyebrow: 'Sélection groupée',
   title: 'Déplacer vers…',
-  lede: (n: number) => n === 1
-    ? '1 note sera déplacée vers la destination choisie.'
-    : `${n} notes seront déplacées vers la destination choisie.`,
+  lede: (docs: number, dirs: number) => {
+    const parts: string[] = []
+    if (docs > 0) parts.push(docs === 1 ? '1 note' : `${docs} notes`)
+    if (dirs > 0) parts.push(dirs === 1 ? '1 dossier (avec tout son contenu)' : `${dirs} dossiers (avec tout leur contenu)`)
+    if (parts.length === 0) return 'Rien de sélectionné.'
+    return `${parts.join(' et ')} vers la destination choisie.`
+  },
   workspaceLabel: 'Workspace',
   folderLabel: 'Dossier',
   root: 'Racine',
@@ -86,9 +97,14 @@ const folderOptions = computed<FolderOption[]>(() => {
     else byParent.set(key, [f])
   }
 
+  // A folder being moved can't be its own destination, and neither can
+  // anything beneath it — the whole branch is pruned from the options.
+  const excluded = new Set(props.excludeFolderIds ?? [])
+
   const out: FolderOption[] = []
   const walk = (parentId: number | null, depth: number) => {
     for (const f of byParent.get(parentId) ?? []) {
+      if (excluded.has(f.id)) continue
       out.push({ id: f.id, label: `${'  '.repeat(depth)}${depth > 0 ? '└ ' : ''}${f.name}` })
       walk(f.id, depth + 1)
     }
@@ -178,7 +194,7 @@ function workspaceLabel(w: { name: string, emoji?: string | null, shared: boolea
             <header class="head">
               <p class="eyebrow">{{ L.eyebrow }}</p>
               <h2 id="move-to-title" class="title">{{ L.title }}</h2>
-              <p class="lede">{{ L.lede(count) }}</p>
+              <p class="lede">{{ L.lede(docCount, folderCount) }}</p>
             </header>
 
             <form class="form" @submit.prevent="onSubmit">

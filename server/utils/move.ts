@@ -29,7 +29,7 @@
  * The whole rewrite runs in one better-sqlite3 transaction — a note is never
  * left in the destination workspace still encrypted under the source key.
  */
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { createError } from 'h3'
 import { getRawDb, useDb } from '~/server/database/client'
 import {
@@ -42,12 +42,13 @@ import {
 import {
   assertCanEdit,
   assertDocumentMembership,
+  assertFolderMembership,
   assertWorkspaceMembership,
 } from './access'
 import { decryptField, encryptField, isEncrypted } from './crypto'
 import { extractDocLinks, reconcileDocLinks } from './doc-links'
-import { decryptDocument } from './encrypted-entities'
-import { updateUserDocument } from './notes'
+import { decryptDocument, decryptFolder } from './encrypted-entities'
+import { updateUserDocument, updateUserFolder } from './notes'
 import { getWorkspaceKeyForUserById, type WorkspaceKeyCache } from './workspace-key'
 
 export interface MoveDocumentTarget {
@@ -215,8 +216,311 @@ export async function moveUserDocument(
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Folders                                                                    */
+/* -------------------------------------------------------------------------- */
+
+export interface MoveFolderTarget {
+  /** Destination workspace. Omitted / null keeps the folder where it is. */
+  workspaceId?: number | null
+  /** Destination parent folder — `null` means workspace root. */
+  parentId: number | null
+}
+
+export interface MoveFolderResult {
+  folder: Folder
+  crossWorkspace: boolean
+  rekeyed: boolean
+  /** Subfolders carried along (excluding the moved folder itself). */
+  movedFolders: number
+  /** Notes carried along, trashed ones included. */
+  movedDocuments: number
+  revokedShareTokens: number
+}
+
+/**
+ * Move a folder **with its whole subtree** — subfolders, notes, and their
+ * content. This is what "move" means for a folder; flattening its notes into
+ * the destination would destroy the structure the user built.
+ *
+ * Cross-workspace, the same re-key applies as for a single note, extended to
+ * every folder name and every document in the subtree. Trashed rows travel too:
+ * leaving them behind would orphan them under a parent that no longer lives in
+ * their workspace.
+ */
+export async function moveUserFolder(
+  userId: number,
+  folderId: number,
+  target: MoveFolderTarget,
+  dek: Buffer | null = null,
+  cache?: WorkspaceKeyCache,
+): Promise<MoveFolderResult> {
+  const { folder, role } = await assertFolderMembership(userId, folderId)
+  assertCanEdit(role)
+  if (folder.deletedAt != null) {
+    throw createError({ statusCode: 400, statusMessage: 'Folder is in trash' })
+  }
+
+  const targetWorkspaceId = target.workspaceId ?? folder.workspaceId
+  await assertMoveTarget(userId, targetWorkspaceId, target.parentId)
+
+  const db = useDb()
+
+  // Subtree ids, walked from the source workspace's folder rows. Trashed
+  // folders included — see the doc comment.
+  const allFolders = await db
+    .select({ id: folders.id, parentId: folders.parentId })
+    .from(folders)
+    .where(eq(folders.workspaceId, folder.workspaceId))
+  const childrenOf = new Map<number | null, number[]>()
+  for (const f of allFolders) {
+    const key = f.parentId ?? null
+    const bucket = childrenOf.get(key)
+    if (bucket) bucket.push(f.id)
+    else childrenOf.set(key, [f.id])
+  }
+  const subtree: number[] = []
+  const walk = (id: number) => {
+    subtree.push(id)
+    for (const child of childrenOf.get(id) ?? []) walk(child)
+  }
+  walk(folderId)
+
+  // A folder can't become its own descendant.
+  if (target.parentId != null && subtree.includes(target.parentId)) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: 'Cannot move a folder into itself or one of its subfolders',
+    })
+  }
+
+  const subtreeDocs = await db
+    .select({ id: documents.id, markdown: documents.markdown })
+    .from(documents)
+    .where(inArray(documents.folderId, subtree))
+
+  const sourceKey = await getWorkspaceKeyForUserById(userId, folder.workspaceId, dek, cache)
+
+  /* ---------------- same workspace: re-parent and nothing else ------------ */
+  if (targetWorkspaceId === folder.workspaceId) {
+    if (target.parentId === (folder.parentId ?? null)) {
+      return {
+        folder,
+        crossWorkspace: false,
+        rekeyed: false,
+        movedFolders: subtree.length - 1,
+        movedDocuments: subtreeDocs.length,
+        revokedShareTokens: 0,
+      }
+    }
+    const updated = await updateUserFolder(userId, folderId, { parentId: target.parentId }, sourceKey)
+    return {
+      folder: updated,
+      crossWorkspace: false,
+      rekeyed: false,
+      movedFolders: subtree.length - 1,
+      movedDocuments: subtreeDocs.length,
+      revokedShareTokens: 0,
+    }
+  }
+
+  /* ------------------------- cross-workspace move ------------------------ */
+  const targetKey = await getWorkspaceKeyForUserById(userId, targetWorkspaceId, dek, cache)
+  const rekeyed = !sameKey(sourceKey, targetKey)
+
+  if (rekeyed && (!sourceKey || !targetKey)) {
+    throw createError({
+      statusCode: 409,
+      statusMessage: 'missing_key',
+      data: { detail: 'Cannot re-encrypt this folder for the target workspace.' },
+    })
+  }
+
+  // Decrypt every body up front: `reconcileDocLinks` needs plaintext, and a
+  // failure here must abort before anything is written.
+  const plainMarkdown = new Map<number, string>()
+  try {
+    for (const doc of subtreeDocs) {
+      plainMarkdown.set(doc.id, decryptField(doc.markdown, sourceKey))
+    }
+  }
+  catch {
+    throw createError({
+      statusCode: 409,
+      statusMessage: 'decrypt_failed',
+      data: { detail: 'Folder contents could not be decrypted with the source workspace key.' },
+    })
+  }
+
+  const [{ maxPosition = -1 } = { maxPosition: -1 }] = await db
+    .select({ maxPosition: sql<number>`coalesce(max(${folders.position}), -1)`.mapWith(Number) })
+    .from(folders)
+    .where(and(
+      eq(folders.workspaceId, targetWorkspaceId),
+      target.parentId == null ? isNull(folders.parentId) : eq(folders.parentId, target.parentId),
+      isNull(folders.deletedAt),
+    ))
+
+  const revokedShareTokens = relocateFolderRows({
+    rootFolderId: folderId,
+    subtreeFolderIds: subtree,
+    docIds: subtreeDocs.map(d => d.id),
+    targetWorkspaceId,
+    targetParentId: target.parentId,
+    position: maxPosition + 1,
+    oldKey: rekeyed ? sourceKey! : null,
+    newKey: rekeyed ? targetKey! : null,
+  })
+
+  for (const [docId, markdown] of plainMarkdown) {
+    try {
+      await reconcileDocLinks(docId, extractDocLinks(markdown, targetWorkspaceId))
+    }
+    catch (err) {
+      console.error('[doc-links] reconcile failed after folder move for doc', docId, err)
+    }
+  }
+
+  const [moved] = await db.select().from(folders).where(eq(folders.id, folderId)).limit(1)
+  if (!moved) {
+    throw createError({ statusCode: 404, statusMessage: 'Folder not found' })
+  }
+
+  return {
+    folder: decryptFolder(moved, targetKey),
+    crossWorkspace: true,
+    rekeyed,
+    movedFolders: subtree.length - 1,
+    movedDocuments: subtreeDocs.length,
+    revokedShareTokens,
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /*  The transactional half                                                     */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * Field-level re-encryption closures for one (oldKey -> newKey) pair. When
+ * either key is missing the re-key is a no-op, which keeps a single code path
+ * for "moved but same key" relocations.
+ */
+interface Reencryptor {
+  /** True when the keys actually differ and content must be rewritten. */
+  active: boolean
+  field: (s: string | null | undefined) => string
+  /** JSON array of strings, encrypted per element (see `encrypted-entities`). */
+  list: (raw: string | null) => string
+  actionItems: (raw: string | null) => string
+}
+
+function makeReencryptor(oldKey: Buffer | null, newKey: Buffer | null): Reencryptor {
+  const active = !!oldKey && !!newKey
+  const field = (s: string | null | undefined): string => {
+    if (s == null) return ''
+    if (!active) return s
+    if (!isEncrypted(s)) return encryptField(s, newKey!)
+    return encryptField(decryptField(s, oldKey!), newKey!)
+  }
+  const parse = (raw: string | null): unknown[] => {
+    try {
+      const parsed = JSON.parse(raw ?? '[]')
+      return Array.isArray(parsed) ? parsed : []
+    }
+    catch { return [] }
+  }
+  return {
+    active,
+    field,
+    list: raw => JSON.stringify(parse(raw).map(s => typeof s === 'string' ? field(s) : s)),
+    actionItems: raw => JSON.stringify(parse(raw).map((it) => {
+      const item = it as { text?: string, done?: boolean }
+      return { text: typeof item.text === 'string' ? field(item.text) : '', done: !!item.done }
+    })),
+  }
+}
+
+/**
+ * Re-encrypt everything hanging off a document — versions, analysis, chunks —
+ * and revoke its now-unopenable public share links. Caller must already be
+ * inside a transaction; the `documents` row itself is handled separately
+ * because its other columns differ between a note move and a folder move.
+ *
+ * Returns the number of share tokens revoked.
+ */
+function reencryptDocSubrows(
+  sqlite: ReturnType<typeof getRawDb>,
+  docId: number,
+  r: Reencryptor,
+  nowSeconds: number,
+): number {
+  if (!r.active) return 0
+
+  // document_versions — the history travels with the note.
+  const versionRows = sqlite.prepare<[number], { id: number, title: string, markdown: string, content_json: string }>(
+    `SELECT id, title, markdown, content_json FROM document_versions WHERE doc_id = ?`,
+  ).all(docId)
+  const updVersion = sqlite.prepare(
+    `UPDATE document_versions SET title = ?, markdown = ?, content_json = ? WHERE id = ?`,
+  )
+  for (const v of versionRows) {
+    updVersion.run(r.field(v.title), r.field(v.markdown), r.field(v.content_json), v.id)
+  }
+
+  // doc_analyses — JSON-mode columns hold per-element envelopes.
+  const analysis = sqlite.prepare<[number], {
+    summary_short: string, summary_long: string,
+    use_cases: string, tags: string, questions: string, action_items: string,
+  }>(
+    `SELECT summary_short, summary_long, use_cases, tags, questions, action_items
+       FROM doc_analyses WHERE doc_id = ?`,
+  ).get(docId)
+  if (analysis) {
+    sqlite.prepare(
+      `UPDATE doc_analyses
+          SET summary_short = ?, summary_long = ?, use_cases = ?, tags = ?, questions = ?, action_items = ?
+        WHERE doc_id = ?`,
+    ).run(
+      r.field(analysis.summary_short),
+      r.field(analysis.summary_long),
+      r.list(analysis.use_cases),
+      r.list(analysis.tags),
+      r.list(analysis.questions),
+      r.actionItems(analysis.action_items),
+      docId,
+    )
+  }
+
+  // doc_chunks.text — embeddings + the FTS5 mirror stay as they are
+  // (cleartext by design, and the text itself hasn't changed).
+  const chunkRows = sqlite.prepare<[number], { id: number, text: string }>(
+    `SELECT id, text FROM doc_chunks WHERE doc_id = ?`,
+  ).all(docId)
+  const updChunk = sqlite.prepare(`UPDATE doc_chunks SET text = ? WHERE id = ?`)
+  for (const c of chunkRows) updChunk.run(r.field(c.text), c.id)
+
+  // Public share links wrap the OLD key under a token we can't recover.
+  return sqlite.prepare(
+    `UPDATE share_tokens SET revoked_at = ? WHERE doc_id = ? AND revoked_at IS NULL`,
+  ).run(nowSeconds, docId).changes
+}
+
+/**
+ * `doc_links` is workspace-scoped, so drop every row that now straddles two
+ * workspaces. Outgoing rows are re-derived by `reconcileDocLinks` once the
+ * transaction has committed.
+ */
+function pruneCrossWorkspaceLinks(
+  sqlite: ReturnType<typeof getRawDb>,
+  docId: number,
+  workspaceId: number,
+): void {
+  sqlite.prepare(`DELETE FROM doc_links WHERE source_doc_id = ?`).run(docId)
+  sqlite.prepare(
+    `DELETE FROM doc_links
+      WHERE target_doc_id = ?
+        AND source_doc_id IN (SELECT id FROM documents WHERE workspace_id <> ?)`,
+  ).run(docId, workspaceId)
+}
 
 interface RelocateArgs {
   docId: number
@@ -240,31 +544,7 @@ function relocateDocumentRows(args: RelocateArgs): number {
   const { docId, targetWorkspaceId, targetFolderId, position, oldKey, newKey } = args
   const sqlite = getRawDb()
   const nowSeconds = Math.floor(Date.now() / 1000)
-
-  // No re-key => identity. Keeps a single code path for both cases.
-  const reenc = (s: string | null | undefined): string => {
-    if (s == null) return ''
-    if (!oldKey || !newKey) return s
-    if (!isEncrypted(s)) return encryptField(s, newKey)
-    return encryptField(decryptField(s, oldKey), newKey)
-  }
-  const reencList = (raw: string | null): string => {
-    let list: unknown = []
-    try { list = JSON.parse(raw ?? '[]') }
-    catch { list = [] }
-    const arr = Array.isArray(list) ? list : []
-    return JSON.stringify(arr.map(s => typeof s === 'string' ? reenc(s) : s))
-  }
-  const reencActionItems = (raw: string | null): string => {
-    let list: unknown = []
-    try { list = JSON.parse(raw ?? '[]') }
-    catch { list = [] }
-    const arr = Array.isArray(list) ? list : []
-    return JSON.stringify(arr.map((it) => {
-      const item = it as { text?: string, done?: boolean }
-      return { text: typeof item.text === 'string' ? reenc(item.text) : '', done: !!item.done }
-    }))
-  }
+  const r = makeReencryptor(oldKey, newKey)
 
   let revoked = 0
 
@@ -284,72 +564,88 @@ function relocateDocumentRows(args: RelocateArgs): number {
       targetFolderId,
       position,
       nowSeconds,
-      reenc(docRow.title),
-      reenc(docRow.markdown),
-      reenc(docRow.content_json),
+      r.field(docRow.title),
+      r.field(docRow.markdown),
+      r.field(docRow.content_json),
       docId,
     )
 
-    if (oldKey && newKey) {
-      // document_versions — the history moves with the note.
-      const versionRows = sqlite.prepare<[number], { id: number, title: string, markdown: string, content_json: string }>(
-        `SELECT id, title, markdown, content_json FROM document_versions WHERE doc_id = ?`,
-      ).all(docId)
-      const updVersion = sqlite.prepare(
-        `UPDATE document_versions SET title = ?, markdown = ?, content_json = ? WHERE id = ?`,
-      )
-      for (const v of versionRows) {
-        updVersion.run(reenc(v.title), reenc(v.markdown), reenc(v.content_json), v.id)
-      }
+    revoked = reencryptDocSubrows(sqlite, docId, r, nowSeconds)
+    pruneCrossWorkspaceLinks(sqlite, docId, targetWorkspaceId)
+  })
 
-      // doc_analyses — JSON-mode columns hold per-element envelopes.
-      const analysis = sqlite.prepare<[number], {
-        summary_short: string, summary_long: string,
-        use_cases: string, tags: string, questions: string, action_items: string,
-      }>(
-        `SELECT summary_short, summary_long, use_cases, tags, questions, action_items
-           FROM doc_analyses WHERE doc_id = ?`,
-      ).get(docId)
-      if (analysis) {
-        sqlite.prepare(
-          `UPDATE doc_analyses
-              SET summary_short = ?, summary_long = ?, use_cases = ?, tags = ?, questions = ?, action_items = ?
-            WHERE doc_id = ?`,
-        ).run(
-          reenc(analysis.summary_short),
-          reenc(analysis.summary_long),
-          reencList(analysis.use_cases),
-          reencList(analysis.tags),
-          reencList(analysis.questions),
-          reencActionItems(analysis.action_items),
-          docId,
-        )
-      }
+  tx()
+  return revoked
+}
 
-      // doc_chunks.text — embeddings + the FTS5 mirror stay as they are
-      // (cleartext by design, and the text itself hasn't changed).
-      const chunkRows = sqlite.prepare<[number], { id: number, text: string }>(
-        `SELECT id, text FROM doc_chunks WHERE doc_id = ?`,
-      ).all(docId)
-      const updChunk = sqlite.prepare(`UPDATE doc_chunks SET text = ? WHERE id = ?`)
-      for (const c of chunkRows) updChunk.run(reenc(c.text), c.id)
+interface RelocateFolderArgs {
+  rootFolderId: number
+  /** Root folder + every descendant, in walk order. */
+  subtreeFolderIds: number[]
+  docIds: number[]
+  targetWorkspaceId: number
+  targetParentId: number | null
+  position: number
+  oldKey: Buffer | null
+  newKey: Buffer | null
+}
 
-      // Public share links wrap the OLD key under a token we can't recover.
-      const res = sqlite.prepare(
-        `UPDATE share_tokens SET revoked_at = ? WHERE doc_id = ? AND revoked_at IS NULL`,
-      ).run(nowSeconds, docId)
-      revoked = res.changes
+/**
+ * Relocate a whole folder subtree in one transaction: folder rows change
+ * workspace (the root also changes parent), names and document contents are
+ * re-keyed. Inner `parent_id` and `folder_id` links are left alone — ids don't
+ * change, so the structure survives the move as-is.
+ *
+ * Returns the number of share tokens revoked.
+ */
+function relocateFolderRows(args: RelocateFolderArgs): number {
+  const {
+    rootFolderId, subtreeFolderIds, docIds,
+    targetWorkspaceId, targetParentId, position, oldKey, newKey,
+  } = args
+  const sqlite = getRawDb()
+  const nowSeconds = Math.floor(Date.now() / 1000)
+  const r = makeReencryptor(oldKey, newKey)
+
+  let revoked = 0
+
+  const tx = sqlite.transaction(() => {
+    const selectFolder = sqlite.prepare<[number], { name: string }>(
+      `SELECT name FROM folders WHERE id = ?`,
+    )
+    const updFolder = sqlite.prepare(
+      `UPDATE folders SET workspace_id = ?, name = ? WHERE id = ?`,
+    )
+    for (const id of subtreeFolderIds) {
+      const row = selectFolder.get(id)
+      if (!row) continue
+      updFolder.run(targetWorkspaceId, r.field(row.name), id)
     }
+    // Only the root re-parents; descendants keep pointing at their parent.
+    sqlite.prepare(`UPDATE folders SET parent_id = ?, position = ? WHERE id = ?`)
+      .run(targetParentId, position, rootFolderId)
 
-    // doc_links is workspace-scoped: drop everything that now straddles two
-    // workspaces. Outgoing rows are re-derived by `reconcileDocLinks` right
-    // after the transaction.
-    sqlite.prepare(`DELETE FROM doc_links WHERE source_doc_id = ?`).run(docId)
-    sqlite.prepare(
-      `DELETE FROM doc_links
-        WHERE target_doc_id = ?
-          AND source_doc_id IN (SELECT id FROM documents WHERE workspace_id <> ?)`,
-    ).run(docId, targetWorkspaceId)
+    const selectDoc = sqlite.prepare<[number], { title: string, markdown: string, content_json: string }>(
+      `SELECT title, markdown, content_json FROM documents WHERE id = ?`,
+    )
+    const updDoc = sqlite.prepare(
+      `UPDATE documents SET workspace_id = ?, title = ?, markdown = ?, content_json = ? WHERE id = ?`,
+    )
+    for (const docId of docIds) {
+      const row = selectDoc.get(docId)
+      if (!row) continue
+      // `updated_at` is deliberately untouched: the notes themselves weren't
+      // edited, and bumping them would reshuffle every "recent" list.
+      updDoc.run(
+        targetWorkspaceId,
+        r.field(row.title),
+        r.field(row.markdown),
+        r.field(row.content_json),
+        docId,
+      )
+      revoked += reencryptDocSubrows(sqlite, docId, r, nowSeconds)
+      pruneCrossWorkspaceLinks(sqlite, docId, targetWorkspaceId)
+    }
   })
 
   tx()

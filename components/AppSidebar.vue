@@ -60,7 +60,7 @@ const L = {
   analyzeConfirmBody: 'NoteForge va contacter Mistral pour chaque note sélectionnée — y compris toutes les notes des dossiers cochés (analyse + réindexation). Cela peut prendre plusieurs dizaines de secondes.',
   analyzeConfirmYes: 'Réanalyser',
   moveDoneTitle: 'Déplacement terminé',
-  movePartial: (ok: number, ko: number) => `${ok} note(s) déplacée(s), ${ko} en échec.`,
+  movePartial: (ok: number, ko: number) => `${ok} élément(s) déplacé(s), ${ko} en échec.`,
   moveRevoked: (n: number) => n === 1
     ? '1 lien public a été révoqué (rechiffrement).'
     : `${n} liens publics ont été révoqués (rechiffrement).`,
@@ -159,6 +159,8 @@ function onToggleBulk() {
 interface BulkResult {
   ok: number[]
   errors: { docId: number, message: string }[]
+  okFolders?: number[]
+  folderErrors?: { folderId: number, message: string }[]
   workspaceId?: number
   revokedShareTokens?: number
 }
@@ -194,7 +196,10 @@ async function onMoveConfirm(target: { workspaceId: number, folderId: number | n
     bulkSelect.exit()
 
     const notes: string[] = []
-    if (res.errors.length > 0) notes.push(L.movePartial(res.ok.length, res.errors.length))
+    const failed = res.errors.length + (res.folderErrors?.length ?? 0)
+    if (failed > 0) {
+      notes.push(L.movePartial(res.ok.length + (res.okFolders?.length ?? 0), failed))
+    }
     if (res.revokedShareTokens) notes.push(L.moveRevoked(res.revokedShareTokens))
     if (notes.length > 0) {
       await dialog.alert({ title: L.moveDoneTitle, message: notes.join(' ') })
@@ -1069,7 +1074,9 @@ async function onRootDocDrop(e: DragEvent) {
     />
     <MoveToDialog
       :open="moveOpen"
-      :count="bulkSelect.totalCount"
+      :doc-count="bulkSelect.docCount"
+      :folder-count="bulkSelect.folderCount"
+      :exclude-folder-ids="bulkSelect.selectedFolders"
       :busy="moveBusy"
       @close="moveOpen = false"
       @confirm="onMoveConfirm"

@@ -19,8 +19,13 @@
  * unioned with `docIds` before the action runs. So a folder-only selection is
  * valid as long as it resolves to at least one note.
  *
+ * ⚠️ `move` is the exception and does NOT expand: a folder is moved AS a
+ * folder, subtree and hierarchy intact. Expanding it would drop every note
+ * flat into the destination and destroy the structure. A selected note that
+ * already lives inside a selected folder is skipped — it travels with it.
+ *
  * Body shape (zod):
- *   { action, docIds?, folderIds?, folderId?, workspaceId?, tag? }
+ *   { action, docIds?, folderIds?, folderId?, workspaceId?, placements?, tag? }
  */
 import { Readable } from 'node:stream'
 import archiver from 'archiver'
@@ -28,7 +33,7 @@ import { eq, inArray } from 'drizzle-orm'
 import { z } from 'zod'
 import { createError, defineEventHandler, readValidatedBody, setHeader } from 'h3'
 import { useDb } from '~/server/database/client'
-import { docAnalyses, documents } from '~/server/database/schema'
+import { docAnalyses, documents, folders } from '~/server/database/schema'
 import {
   assertDocumentOwnership,
   assertFolderOwnership,
@@ -40,7 +45,7 @@ import {
   encryptAnalysis,
 } from '~/server/utils/encrypted-entities'
 import { buildHtml, slugify } from '~/server/utils/export'
-import { assertMoveTarget, moveUserDocument } from '~/server/utils/move'
+import { assertMoveTarget, moveUserDocument, moveUserFolder } from '~/server/utils/move'
 import {
   analyzeUserDocument,
   collectActiveDocIdsInFolders,
@@ -77,6 +82,9 @@ const Body = z.object({
 interface BulkResult {
   ok: number[]
   errors: { docId: number, message: string }[]
+  /** move only — folders relocated with their whole subtree. */
+  okFolders?: number[]
+  folderErrors?: { folderId: number, message: string }[]
   /** move only — destination workspace, echoed so the UI can refresh it. */
   workspaceId?: number
   /** move only — public share links revoked by a cross-workspace re-key. */
@@ -110,6 +118,146 @@ export default defineEventHandler(async (event) => {
       }
       catch (err) {
         result.errors.push({ docId: p.docId, message: (err as Error).message || 'failed' })
+      }
+    }
+    return result
+  }
+
+  /* -------- action: move -------- */
+  // Handled before the folder expansion below, and deliberately NOT sharing it:
+  // for every other action a selected folder means "all the notes inside it",
+  // but moving a folder must move THE FOLDER — subtree and structure included.
+  // Expanding here would land every note flat in the destination and destroy
+  // the hierarchy.
+  if (input.action === 'move') {
+    if (input.folderId === undefined) {
+      throw createError({ statusCode: 400, statusMessage: 'folderId is required for move' })
+    }
+    if (input.docIds.length === 0 && input.folderIds.length === 0) {
+      throw createError({ statusCode: 400, statusMessage: 'Selection is empty' })
+    }
+    const targetFolderId = input.folderId ?? null
+
+    // Pre-check the destination once; if it's forbidden or inconsistent, fail
+    // loudly (one destination for the whole batch — no partial-move semantics
+    // make sense here). Without an explicit workspace the destination is
+    // per-item, so only the folder can be validated up front.
+    if (input.workspaceId !== undefined) {
+      await assertMoveTarget(user.id, input.workspaceId, targetFolderId)
+    }
+    else if (targetFolderId !== null) {
+      await assertFolderOwnership(user.id, targetFolderId)
+    }
+
+    // Share the per-request key cache across the batch so a shared workspace's
+    // WEK is unwrapped once, not once per item.
+    const keyCache = (event.context as unknown) as WorkspaceKeyCache
+    const result: BulkResult = {
+      ok: [], errors: [], okFolders: [], folderErrors: [], revokedShareTokens: 0,
+    }
+    if (input.workspaceId !== undefined) result.workspaceId = input.workspaceId
+
+    // Ownership first, so the tree walk below only ever reads folders the
+    // caller may see.
+    const ownedFolderIds: number[] = []
+    for (const id of new Set(input.folderIds)) {
+      try {
+        await assertFolderOwnership(user.id, id)
+        ownedFolderIds.push(id)
+      }
+      catch (err) {
+        result.folderErrors!.push({ folderId: id, message: (err as Error).message || 'forbidden' })
+      }
+    }
+
+    // Selecting a folder AND something already inside it must not move that
+    // thing twice: a nested selected folder travels with its ancestor, and so
+    // does any selected note living in the subtree.
+    let rootFolderIds = ownedFolderIds
+    const coveredFolderIds = new Set<number>(ownedFolderIds)
+    if (ownedFolderIds.length > 0) {
+      const workspaceIds = Array.from(new Set(
+        (await db
+          .select({ workspaceId: folders.workspaceId })
+          .from(folders)
+          .where(inArray(folders.id, ownedFolderIds))
+        ).map(f => f.workspaceId),
+      ))
+      const scope = await db
+        .select({ id: folders.id, parentId: folders.parentId })
+        .from(folders)
+        .where(inArray(folders.workspaceId, workspaceIds))
+      const parentOf = new Map(scope.map(f => [f.id, f.parentId ?? null]))
+      const selected = new Set(ownedFolderIds)
+
+      const hasSelectedAncestor = (id: number): boolean => {
+        let cursor = parentOf.get(id) ?? null
+        let safety = 0
+        while (cursor !== null && safety < 1000) {
+          if (selected.has(cursor)) return true
+          cursor = parentOf.get(cursor) ?? null
+          safety++
+        }
+        return false
+      }
+      rootFolderIds = ownedFolderIds.filter(id => !hasSelectedAncestor(id))
+
+      const childrenOf = new Map<number, number[]>()
+      for (const f of scope) {
+        if (f.parentId == null) continue
+        const bucket = childrenOf.get(f.parentId)
+        if (bucket) bucket.push(f.id)
+        else childrenOf.set(f.parentId, [f.id])
+      }
+      const collect = (id: number) => {
+        coveredFolderIds.add(id)
+        for (const child of childrenOf.get(id) ?? []) collect(child)
+      }
+      for (const id of rootFolderIds) collect(id)
+    }
+
+    for (const folderId of rootFolderIds) {
+      try {
+        const moved = await moveUserFolder(
+          user.id,
+          folderId,
+          { workspaceId: input.workspaceId ?? null, parentId: targetFolderId },
+          dek,
+          keyCache,
+        )
+        result.revokedShareTokens = (result.revokedShareTokens ?? 0) + moved.revokedShareTokens
+        result.okFolders!.push(folderId)
+      }
+      catch (err) {
+        result.folderErrors!.push({ folderId, message: (err as Error).message || 'failed' })
+      }
+    }
+
+    // Notes that live inside a folder we just moved are already at destination.
+    const docRows = input.docIds.length > 0
+      ? await db
+        .select({ id: documents.id, folderId: documents.folderId })
+        .from(documents)
+        .where(inArray(documents.id, input.docIds))
+      : []
+    const standaloneDocIds = docRows
+      .filter(d => d.folderId == null || !coveredFolderIds.has(d.folderId))
+      .map(d => d.id)
+
+    for (const id of standaloneDocIds) {
+      try {
+        const moved = await moveUserDocument(
+          user.id,
+          id,
+          { workspaceId: input.workspaceId ?? null, folderId: targetFolderId },
+          dek,
+          keyCache,
+        )
+        result.revokedShareTokens = (result.revokedShareTokens ?? 0) + moved.revokedShareTokens
+        result.ok.push(id)
+      }
+      catch (err) {
+        result.errors.push({ docId: id, message: (err as Error).message || 'failed' })
       }
     }
     return result
@@ -188,48 +336,6 @@ export default defineEventHandler(async (event) => {
     void archive.finalize()
     await finished
     return event.node.res
-  }
-
-  /* -------- action: move -------- */
-  if (input.action === 'move') {
-    if (input.folderId === undefined) {
-      throw createError({ statusCode: 400, statusMessage: 'folderId is required for move' })
-    }
-    const targetFolderId = input.folderId ?? null
-
-    // Pre-check the destination once; if it's forbidden or inconsistent, fail
-    // loudly (one destination for all docs — no partial-move semantics make
-    // sense here). Without an explicit workspace the destination is per-doc,
-    // so only the folder can be validated up front.
-    if (input.workspaceId !== undefined) {
-      await assertMoveTarget(user.id, input.workspaceId, targetFolderId)
-    }
-    else if (targetFolderId !== null) {
-      await assertFolderOwnership(user.id, targetFolderId)
-    }
-
-    // Share the per-request key cache across every doc so a shared workspace's
-    // WEK is unwrapped once, not once per note.
-    const keyCache = (event.context as unknown) as WorkspaceKeyCache
-    const result: BulkResult = { ok: [], errors: [], revokedShareTokens: 0 }
-    if (input.workspaceId !== undefined) result.workspaceId = input.workspaceId
-    for (const id of ids) {
-      try {
-        const moved = await moveUserDocument(
-          user.id,
-          id,
-          { workspaceId: input.workspaceId ?? null, folderId: targetFolderId },
-          dek,
-          keyCache,
-        )
-        result.revokedShareTokens = (result.revokedShareTokens ?? 0) + moved.revokedShareTokens
-        result.ok.push(id)
-      }
-      catch (err) {
-        result.errors.push({ docId: id, message: (err as Error).message || 'failed' })
-      }
-    }
-    return result
   }
 
   /* -------- action: trash -------- */
