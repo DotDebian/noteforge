@@ -54,6 +54,7 @@ import { mistralChat, mistralEmbed } from './mistral'
 import { floatsToBuffer } from './vector'
 import { searchChunkGroups, type SearchChunkGroup, type SearchHit } from './search'
 import { scoreTitleMatch, TITLE_MATCH_MIN_SCORE } from './title-match'
+import { applyUnifiedPatch, PatchParseError, type AppliedHunk, type ApplyPatchResult } from './patch'
 import { decryptField } from './crypto'
 import {
   decryptAnalysis,
@@ -1119,6 +1120,96 @@ export async function appendToUserDocument(
     : `${current.replace(/\n+$/, '')}\n\n${addition}`
 
   return updateUserDocument(userId, docId, { markdown: combined }, dek)
+}
+
+export interface PatchDocumentResult {
+  /** Absent on a dry run — nothing was written. */
+  document: Document | null
+  hunks: AppliedHunk[]
+  /** Parser leniencies worth surfacing (unprefixed lines, …). */
+  warnings: string[]
+  dryRun: boolean
+  /** Character counts, so the caller can sanity-check the edit's magnitude. */
+  lengthBefore: number
+  lengthAfter: number
+}
+
+/**
+ * Apply a unified diff to a document's markdown, in place.
+ *
+ * The point is token cost: editing the middle of a long note via
+ * `updateUserDocument` means re-emitting the whole body. A hunk touches only
+ * the lines it names.
+ *
+ * All-or-nothing — a hunk that cannot be located aborts the whole patch with
+ * a 422 whose message tells the caller what was expected and what the
+ * document actually holds there, so it can retry without a blind re-read.
+ * The write itself goes through `updateUserDocument`, so version snapshots,
+ * doc-link reconciliation and re-embedding behave exactly like any other edit.
+ */
+export async function patchUserDocument(
+  userId: number,
+  docId: number,
+  patch: string,
+  dek: Buffer | null = null,
+  { dryRun = false }: { dryRun?: boolean } = {},
+): Promise<PatchDocumentResult> {
+  const { document: raw, role } = await assertDocumentMembership(userId, docId)
+  assertCanEdit(role)
+  if (raw.deletedAt != null) {
+    throw createError({ statusCode: 400, statusMessage: 'Document is in trash' })
+  }
+
+  const current = decryptDocument(raw, dek).markdown ?? ''
+
+  let result: ApplyPatchResult
+  try {
+    result = applyUnifiedPatch(current, patch)
+  }
+  catch (err) {
+    if (err instanceof PatchParseError) {
+      throw createError({
+        statusCode: 400,
+        statusMessage: 'Malformed patch',
+        message: `Malformed patch: ${err.message}`,
+      })
+    }
+    throw err
+  }
+
+  if (!result.ok) {
+    const { failure } = result
+    // The message is the retry hint: what we looked for, and what is really
+    // there. Newlines survive in `message` (h3 only sanitises statusMessage).
+    const expected = failure.expected.map(line => `  ${line}`).join('\n')
+    const actual = failure.actual.lines
+      .map((line, i) => `  ${failure.actual.fromLine + i}| ${line}`)
+      .join('\n')
+    throw createError({
+      statusCode: 422,
+      statusMessage: 'Patch did not apply',
+      message: [
+        `Hunk ${failure.index} (${failure.header}) failed — no change was saved.`,
+        failure.reason,
+        expected.length > 0 ? `Expected to find:\n${expected}` : null,
+        `Document around that position:\n${actual}`,
+      ].filter(Boolean).join('\n\n'),
+      data: { hunkIndex: failure.index, expected: failure.expected, actual: failure.actual },
+    })
+  }
+
+  const document = dryRun
+    ? null
+    : await updateUserDocument(userId, docId, { markdown: result.markdown }, dek)
+
+  return {
+    document,
+    hunks: result.hunks,
+    warnings: result.warnings,
+    dryRun,
+    lengthBefore: current.length,
+    lengthAfter: result.markdown.length,
+  }
 }
 
 export interface TagAggregate {

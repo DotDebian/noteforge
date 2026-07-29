@@ -32,6 +32,7 @@ import {
   listUserDocuments,
   listUserWorkspaces,
   listUserWorkspaceTags,
+  patchUserDocument,
   searchUserNotes,
   softDeleteUserDocument,
   softDeleteUserFolder,
@@ -89,6 +90,13 @@ function jsonResult(payload: unknown) {
 
 function toMcpDocument(doc: Document): Omit<Document, 'contentJson'> {
   const { contentJson: _contentJson, ...rest } = doc
+  return rest
+}
+
+/** Metadata only — drops the body too. Used by write tools whose whole point
+ *  is NOT to move the markdown around (patch_document). */
+function toMcpDocumentMeta(doc: Document): Omit<Document, 'contentJson' | 'markdown'> {
+  const { markdown: _markdown, ...rest } = toMcpDocument(doc)
   return rest
 }
 
@@ -341,8 +349,9 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number | null): Mc
     {
       title: 'Update document',
       description:
-        'Patch a document. Provide any subset of `title` / `markdown` / `folderId`. `markdown` REPLACES the '
-        + 'whole body — to add to the end, prefer append_to_document (no prior read needed). Trashed '
+        'Update a document. Provide any subset of `title` / `markdown` / `folderId`. `markdown` REPLACES the '
+        + 'whole body — to add to the end, prefer append_to_document (no prior read needed); to edit a '
+        + 'section in place, prefer patch_document (rewrites only the lines you name). Trashed '
         + 'documents cannot be updated — restore first.',
       inputSchema: {
         documentId: z.number().int().positive(),
@@ -376,6 +385,60 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number | null): Mc
     instrument('append_to_document', async ({ documentId, markdown }: { documentId: number, markdown: string }) => jsonResult({
       document: toMcpDocument(await appendToUserDocument(user.id, documentId, markdown, await keyForDocument(documentId))),
     })),
+  )
+
+  server.registerTool(
+    'patch_document',
+    {
+      title: 'Patch document (unified diff)',
+      description:
+        'Edit a section of a document IN PLACE with a git-style unified diff, instead of re-sending the '
+        + 'whole body via update_document. This is the tool to use for any targeted change to a long note '
+        + '(fix a paragraph, rewrite a section, insert a row in a table): you only pay for the lines you '
+        + 'touch. Read the document first so the context lines are verbatim.\n'
+        + 'FORMAT — one or more hunks:\n'
+        + '@@ -12,4 +12,5 @@\n'
+        + ' ## Roadmap\n'
+        + '-- ship the beta in June\n'
+        + '+- ship the beta in July\n'
+        + '+- write the migration guide\n'
+        + ' \n'
+        + ' ## Notes\n'
+        + 'Rules: every line inside a hunk carries a prefix — one SPACE for unchanged context, `-` to '
+        + 'remove, `+` to add (so a markdown bullet kept as context reads " - item", and one removed '
+        + 'reads "- - item"). Include 2-3 context lines around each change so it can be located. Line '
+        + 'numbers in `@@` are ADVISORY — hunks are matched by their content, so a miscount is harmless '
+        + 'and `@@ @@` alone is accepted when you give context. Order hunks top-to-bottom; do not overlap '
+        + 'them. No file headers needed (one document per call).\n'
+        + 'Semantics: all-or-nothing — if any hunk fails to match, NOTHING is written and the error shows '
+        + 'what was expected versus what the document actually contains at that spot, so you can fix the '
+        + 'hunk without re-reading everything. Use `dryRun: true` to validate a patch first. The response '
+        + 'deliberately omits the patched markdown (that would undo the token saving) — it returns the '
+        + 'document metadata plus a per-hunk report. Version snapshots, wiki-link reconciliation and '
+        + 're-embedding behave exactly like update_document.',
+      inputSchema: {
+        documentId: z.number().int().positive(),
+        patch: z.string().min(1).max(2_000_000),
+        dryRun: z.boolean().optional(),
+      },
+    },
+    instrument('patch_document', async ({ documentId, patch, dryRun }: { documentId: number, patch: string, dryRun?: boolean }) => {
+      const result = await patchUserDocument(
+        user.id,
+        documentId,
+        patch,
+        await keyForDocument(documentId),
+        { dryRun: dryRun ?? false },
+      )
+      return jsonResult({
+        document: result.document ? toMcpDocumentMeta(result.document) : null,
+        dryRun: result.dryRun,
+        hunks: result.hunks,
+        warnings: result.warnings,
+        lengthBefore: result.lengthBefore,
+        lengthAfter: result.lengthAfter,
+      })
+    }),
   )
 
   server.registerTool(
