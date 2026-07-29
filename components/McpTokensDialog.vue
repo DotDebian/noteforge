@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useNow } from '@vueuse/core'
 import { useMcpTokensStore } from '~/stores/mcpTokens'
+import { useMcpConnectorsStore } from '~/stores/mcpConnectors'
 import { useLocale } from '~/composables/useLocale'
 import { useDialog } from '~/composables/useDialog'
 
@@ -10,6 +11,31 @@ const { t } = useLocale()
 const dialog = useDialog()
 const store = useMcpTokensStore()
 const { tokens, loading, freshToken, freshTokenMeta } = storeToRefs(store)
+
+const connectorsStore = useMcpConnectorsStore()
+const {
+  connectors,
+  loading: connectorsLoading,
+  freshSecret,
+  freshConnector,
+} = storeToRefs(connectorsStore)
+
+/**
+ * Two ways to plug a client into the MCP endpoint, and the choice is dictated
+ * by what the client can do — not by preference:
+ *
+ *  - `bearer` — a static `nf_…` token in an `Authorization` header. Works for
+ *    Claude Desktop (through the `mcp-remote` stdio bridge), scripts, curl.
+ *  - `oauth`  — claude.ai's "custom connector", which has no way to send a
+ *    custom header and only speaks OAuth. NoteForge acts as the authorization
+ *    server; the user pastes the URL + client id + secret into Claude's
+ *    advanced connector settings.
+ */
+type AuthMode = 'bearer' | 'oauth'
+const authMode = ref<AuthMode>('bearer')
+
+const connectorName = ref('')
+const creatingConnector = ref(false)
 
 const props = defineProps<{
   isOpen: boolean
@@ -107,6 +133,55 @@ async function onCreate() {
   }
 }
 
+/* ---------- OAuth connectors ------------------------------------------- */
+
+/**
+ * The connector whose credentials the OAuth steps display. Right after
+ * creation that's the fresh one (the only moment its secret exists in the
+ * clear); otherwise the most recent, so reopening the dialog still shows the
+ * URL and client id needed to finish a half-done setup.
+ */
+const activeConnector = computed(() => freshConnector.value ?? connectors.value[0] ?? null)
+
+async function onCreateConnector() {
+  if (creatingConnector.value) return
+  creatingConnector.value = true
+  error.value = null
+  try {
+    await connectorsStore.create(connectorName.value.trim() || undefined)
+    connectorName.value = ''
+  }
+  catch (e) {
+    error.value = (e as Error).message || t('mcp.oauth.errorCreate')
+  }
+  finally {
+    creatingConnector.value = false
+  }
+}
+
+async function onRevokeConnector(row: { id: number, name: string | null, clientId: string }) {
+  const label = row.name && row.name.trim().length > 0
+    ? `"${row.name}" (${row.clientId})`
+    : row.clientId
+  const ok = await dialog.confirm({
+    title: t('mcp.oauth.revoke.title'),
+    message: t('mcp.oauth.revoke.message', { label }),
+    confirmLabel: t('mcp.revoke.confirm'),
+    destructive: true,
+  })
+  if (!ok) return
+  error.value = null
+  try {
+    await connectorsStore.revoke(row.id)
+  }
+  catch (e) {
+    await dialog.alert({
+      title: t('mcp.revoke.failed'),
+      message: (e as Error).message || t('mcp.revoke.failedMsg'),
+    })
+  }
+}
+
 async function onRevoke(row: { id: number, prefix: string, name: string | null }) {
   const label = row.name && row.name.trim().length > 0
     ? `"${row.name}" (${row.prefix}…)`
@@ -147,16 +222,22 @@ function dismissFresh() {
   store.clearFresh()
 }
 
+function dismissFreshSecret() {
+  connectorsStore.clearFresh()
+}
+
 function close() {
-  // Dismiss the freshly-generated secret on close so re-opening the dialog
-  // doesn't leak it to subsequent viewers of the screen.
+  // Dismiss the freshly-generated secrets on close so re-opening the dialog
+  // doesn't leak them to subsequent viewers of the screen.
   store.clearFresh()
+  connectorsStore.clearFresh()
   emit('close')
 }
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
     if (freshToken.value) dismissFresh()
+    else if (freshSecret.value) dismissFreshSecret()
     else close()
   }
 }
@@ -167,6 +248,9 @@ watch(
     if (open) {
       error.value = null
       store.load().catch((e) => {
+        error.value = (e as Error).message || t('mcp.errorLoad')
+      })
+      connectorsStore.load().catch((e) => {
         error.value = (e as Error).message || t('mcp.errorLoad')
       })
     }
@@ -218,6 +302,26 @@ function formatLastUsed(raw: string | number | Date | null): string {
               <p class="lede">{{ t('mcp.lede') }}</p>
             </header>
 
+            <!-- ============================================================ -->
+            <!-- Auth mode — bearer token vs OAuth custom connector           -->
+            <!-- ============================================================ -->
+            <div class="modes" role="radiogroup" :aria-label="t('mcp.mode.label')">
+              <button
+                v-for="mode in (['bearer', 'oauth'] as const)"
+                :key="mode"
+                type="button"
+                role="radio"
+                :aria-checked="authMode === mode"
+                class="mode"
+                :class="{ 'mode--active': authMode === mode }"
+                @click="authMode = mode"
+              >
+                <span class="mode-title">{{ t(`mcp.mode.${mode}.title`) }}</span>
+                <span class="mode-lede">{{ t(`mcp.mode.${mode}.lede`) }}</span>
+              </button>
+            </div>
+
+            <template v-if="authMode === 'bearer'">
             <!-- ============================================================ -->
             <!-- Step 1 — Generate a token                                     -->
             <!-- ============================================================ -->
@@ -397,6 +501,200 @@ function formatLastUsed(raw: string | number | Date | null): string {
                 </li>
               </ul>
             </section>
+            </template>
+
+            <template v-else>
+            <!-- ============================================================ -->
+            <!-- Step 1 — Register an OAuth connector                          -->
+            <!-- ============================================================ -->
+            <section class="step" :class="{ 'step--done': !!freshSecret }">
+              <div class="step-head">
+                <span class="step-num" aria-hidden="true">
+                  <svg v-if="freshSecret" viewBox="0 0 16 16" width="11" height="11">
+                    <path d="M3 8l3.5 3.5L13 5" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                  <span v-else>1</span>
+                </span>
+                <h3 class="step-title">{{ t('mcp.oauth.step1.title') }}</h3>
+              </div>
+              <p class="step-lede">{{ t('mcp.oauth.step1.lede') }}</p>
+
+              <div v-if="!freshSecret" class="create">
+                <label class="field">
+                  <span class="label">{{ t('mcp.oauth.nameLabel') }}</span>
+                  <input
+                    v-model="connectorName"
+                    type="text"
+                    :placeholder="t('mcp.oauth.namePlaceholder')"
+                    class="input"
+                    maxlength="120"
+                    @keydown.enter.prevent="onCreateConnector"
+                  />
+                </label>
+                <button
+                  type="button"
+                  class="primary"
+                  :disabled="creatingConnector"
+                  @click="onCreateConnector"
+                >
+                  <span v-if="!creatingConnector">{{ t('mcp.oauth.generate') }}</span>
+                  <span v-else>{{ t('mcp.generating') }}</span>
+                </button>
+              </div>
+
+              <p v-if="error" class="error">{{ error }}</p>
+
+              <!-- Secret reveal (shown once, in place of the form) -->
+              <div v-if="freshSecret" class="fresh" :aria-label="t('mcp.oauth.fresh.title')">
+                <div class="fresh-head">
+                  <span class="fresh-eyebrow">{{ t('mcp.oauth.fresh.eyebrow') }}</span>
+                  <button
+                    type="button"
+                    class="icon-btn"
+                    :title="t('mcp.fresh.dismiss')"
+                    @click="dismissFreshSecret"
+                  >
+                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                      <path
+                        d="M4 4l8 8 M12 4l-8 8"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                      />
+                    </svg>
+                  </button>
+                </div>
+                <p class="fresh-warn">{{ t('mcp.oauth.fresh.warn') }}</p>
+              </div>
+            </section>
+
+            <!-- ============================================================ -->
+            <!-- Step 2 — Paste the three fields into Claude                   -->
+            <!-- ============================================================ -->
+            <section class="step" :class="{ 'step--muted': !activeConnector }">
+              <div class="step-head">
+                <span class="step-num" aria-hidden="true">2</span>
+                <h3 class="step-title">{{ t('mcp.oauth.step2.title') }}</h3>
+              </div>
+              <p class="step-lede">{{ t('mcp.oauth.step2.lede') }}</p>
+
+              <div class="creds">
+                <div class="cred">
+                  <span class="label">{{ t('mcp.oauth.field.url') }}</span>
+                  <div class="endpoint-row">
+                    <input
+                      :value="mcpUrl"
+                      readonly
+                      class="row-input"
+                      @focus="($event.target as HTMLInputElement).select()"
+                    />
+                    <button
+                      type="button"
+                      class="ghost-btn ghost-btn--sm"
+                      @click="copy(mcpUrl, 'oauth-url')"
+                    >
+                      {{ copiedKey === 'oauth-url' ? t('mcp.copied') : t('mcp.copy') }}
+                    </button>
+                  </div>
+                </div>
+
+                <div class="cred">
+                  <span class="label">{{ t('mcp.oauth.field.clientId') }}</span>
+                  <div class="endpoint-row">
+                    <input
+                      :value="activeConnector?.clientId ?? ''"
+                      readonly
+                      :placeholder="t('mcp.oauth.field.pending')"
+                      class="row-input"
+                      @focus="($event.target as HTMLInputElement).select()"
+                    />
+                    <button
+                      type="button"
+                      class="ghost-btn ghost-btn--sm"
+                      :disabled="!activeConnector"
+                      @click="copy(activeConnector?.clientId ?? '', 'oauth-client-id')"
+                    >
+                      {{ copiedKey === 'oauth-client-id' ? t('mcp.copied') : t('mcp.copy') }}
+                    </button>
+                  </div>
+                </div>
+
+                <div class="cred">
+                  <span class="label">{{ t('mcp.oauth.field.clientSecret') }}</span>
+                  <div class="endpoint-row">
+                    <input
+                      :value="freshSecret ?? ''"
+                      readonly
+                      :placeholder="activeConnector ? t('mcp.oauth.field.secretGone') : t('mcp.oauth.field.pending')"
+                      class="row-input"
+                      :class="{ 'row-input--secret': !!freshSecret }"
+                      @focus="($event.target as HTMLInputElement).select()"
+                    />
+                    <button
+                      type="button"
+                      class="ghost-btn ghost-btn--sm"
+                      :disabled="!freshSecret"
+                      @click="copy(freshSecret ?? '', 'oauth-client-secret')"
+                    >
+                      {{ copiedKey === 'oauth-client-secret' ? t('mcp.copied') : t('mcp.copy') }}
+                    </button>
+                  </div>
+                  <p v-if="activeConnector && !freshSecret" class="cred-hint">
+                    {{ t('mcp.oauth.field.secretGoneHint') }}
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            <!-- ============================================================ -->
+            <!-- Step 3 — Connect & authorize                                  -->
+            <!-- ============================================================ -->
+            <section class="step" :class="{ 'step--muted': !activeConnector }">
+              <div class="step-head">
+                <span class="step-num" aria-hidden="true">3</span>
+                <h3 class="step-title">{{ t('mcp.oauth.step3.title') }}</h3>
+              </div>
+              <p class="step-lede">{{ t('mcp.oauth.step3.lede') }}</p>
+            </section>
+
+            <!-- Existing connectors list -->
+            <section class="list" :aria-label="t('mcp.oauth.list.title')">
+              <div class="list-head">
+                <p class="label">{{ t('mcp.oauth.list.title') }}</p>
+                <span v-if="connectors.length > 0" class="list-count">{{ connectors.length }}</span>
+              </div>
+              <p v-if="connectorsLoading && connectors.length === 0" class="muted">
+                {{ t('mcp.oauth.list.loading') }}
+              </p>
+              <p v-else-if="!connectorsLoading && connectors.length === 0" class="muted">
+                {{ t('mcp.oauth.list.empty') }}
+              </p>
+              <ul v-else class="rows">
+                <li v-for="row in connectors" :key="row.id" class="row">
+                  <div class="row-main">
+                    <div class="row-info">
+                      <span class="row-prefix">{{ row.clientId }}</span>
+                      <span v-if="row.name" class="row-name">{{ row.name }}</span>
+                    </div>
+                    <button
+                      type="button"
+                      class="ghost-btn ghost-btn--sm ghost-btn--danger"
+                      @click="onRevokeConnector(row)"
+                    >
+                      {{ t('mcp.revoke.button') }}
+                    </button>
+                  </div>
+                  <div class="row-meta">
+                    <span v-if="row.lastUsedAt">
+                      {{ t('mcp.lastUsed', { when: formatLastUsed(row.lastUsedAt) }) }}
+                    </span>
+                    <span v-else class="muted-inline">{{ t('mcp.neverUsed') }}</span>
+                  </div>
+                </li>
+              </ul>
+            </section>
+            </template>
 
             <footer class="foot">
               <button type="button" class="ghost-btn" @click="close">{{ t('mcp.close') }}</button>
@@ -439,6 +737,41 @@ html.dark .card {
 .lede { @apply text-[13px] leading-relaxed text-ink-600 dark:text-ink-300; }
 
 .endpoint-row { @apply flex items-center gap-2; }
+
+/* ----- Auth mode selector -------------------------------------------- */
+.modes { @apply grid grid-cols-2 gap-2 mb-6; }
+.mode {
+  @apply flex flex-col gap-1 text-left px-3 py-2.5 rounded;
+  border: 1px solid theme('colors.ink.200');
+  background: transparent;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+html.dark .mode { border-color: theme('colors.ink.800'); }
+.mode:hover { background: theme('colors.ink.100' / 50%); }
+html.dark .mode:hover { background: theme('colors.ink.800' / 50%); }
+.mode--active {
+  background: theme('colors.accent.50' / 60%);
+  border-color: theme('colors.accent.400');
+}
+html.dark .mode--active {
+  background: theme('colors.accent.900' / 25%);
+  border-color: theme('colors.accent.600');
+}
+.mode-title {
+  @apply font-sans uppercase text-[10px] font-semibold tracking-[0.1em] text-ink-600 dark:text-ink-300;
+}
+.mode--active .mode-title { @apply text-accent-700 dark:text-accent-300; }
+.mode-lede {
+  @apply text-[11.5px] leading-snug text-ink-500 dark:text-ink-400;
+}
+
+/* ----- OAuth credential rows ----------------------------------------- */
+.creds { @apply flex flex-col gap-3 pl-[34px]; }
+.cred { @apply flex flex-col gap-1.5; }
+.cred-hint {
+  @apply text-[11.5px] leading-snug text-ink-500 dark:text-ink-400;
+}
 
 /* ----- Step blocks --------------------------------------------------- */
 .step {

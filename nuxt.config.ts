@@ -30,6 +30,32 @@ export default defineNuxtConfig({
     },
   },
   nitro: {
+    // OAuth discovery documents. These live under `/.well-known/…`, and a
+    // dot-prefixed directory inside `server/routes/` is not something we want
+    // to depend on the file scanner picking up — registering them explicitly
+    // is unambiguous in dev and in the built output alike.
+    //
+    // Each document is served from two paths: the bare well-known URL and the
+    // RFC 9728 / RFC 8414 "path-inserted" variant that carries the resource
+    // path (`/api/mcp`). Clients disagree on which they probe first.
+    handlers: [
+      {
+        route: '/.well-known/oauth-protected-resource',
+        handler: '~/server/oauth/protected-resource.ts',
+      },
+      {
+        route: '/.well-known/oauth-protected-resource/api/mcp',
+        handler: '~/server/oauth/protected-resource.ts',
+      },
+      {
+        route: '/.well-known/oauth-authorization-server',
+        handler: '~/server/oauth/authorization-server.ts',
+      },
+      {
+        route: '/.well-known/oauth-authorization-server/api/mcp',
+        handler: '~/server/oauth/authorization-server.ts',
+      },
+    ],
     // sqlite-vec ships its native .so via a platform-suffixed sibling package
     // (sqlite-vec-linux-x64, sqlite-vec-darwin-arm64, ...) and resolves it
     // dynamically via import.meta.resolve. Nitro's NFT trace inlines

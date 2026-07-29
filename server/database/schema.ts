@@ -437,6 +437,127 @@ export const mcpTokens = sqliteTable(
 )
 
 /* -------------------------------------------------------------------------- */
+/*  OAuth 2.1 authorization server (Claude custom connectors)                  */
+/*                                                                             */
+/*  claude.ai's "custom connector" flow cannot send a static bearer header —   */
+/*  it only speaks OAuth. So NoteForge doubles as a (tiny, single-tenant)      */
+/*  authorization server for its own MCP resource:                             */
+/*                                                                             */
+/*    oauth_clients     — one row per connector the user registers. The client */
+/*                        secret is stored SHA-256-hashed like `mcp_tokens`.   */
+/*    oauth_auth_codes  — short-lived authorization codes (PKCE, single use).  */
+/*    oauth_tokens      — issued access + refresh token pairs (one row per     */
+/*                        grant; refresh rotates both in place).               */
+/*                                                                             */
+/*  Every artefact that can authenticate an MCP call carries its own copy of   */
+/*  the user's DEK, wrapped under a key derived from that artefact via HKDF    */
+/*  (`deriveTokenWrapKey`) — exactly the scheme `mcp_tokens.wrapped_dek` uses.  */
+/*  The DEK is captured from the browser session at consent time and handed    */
+/*  down the chain code → access token → refreshed access token, so an MCP     */
+/*  request can decrypt user content from the bearer alone.                    */
+/* -------------------------------------------------------------------------- */
+
+export const oauthClients = sqliteTable(
+  'oauth_clients',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name'),
+    /** Public identifier handed to the connector (`nfc_…`). */
+    clientId: text('client_id').notNull(),
+    /** SHA-256 hex of the client secret — the clear value is shown once. */
+    clientSecretHash: text('client_secret_hash').notNull(),
+    /** First ~11 chars of the secret, for UI display only. */
+    secretPrefix: text('secret_prefix').notNull(),
+    /** Allowed redirect URIs (exact match, plus loopback allowance at check time). */
+    redirectUris: text('redirect_uris', { mode: 'json' }).$type<string[]>().notNull(),
+    lastUsedAt: integer('last_used_at', { mode: 'timestamp' }),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    revokedAt: integer('revoked_at', { mode: 'timestamp' }),
+  },
+  (t) => ({
+    clientIdIdx: uniqueIndex('oauth_clients_client_id_idx').on(t.clientId),
+    userIdx: index('oauth_clients_user_idx').on(t.userId),
+  }),
+)
+
+export const oauthAuthCodes = sqliteTable(
+  'oauth_auth_codes',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    clientRowId: integer('client_row_id')
+      .notNull()
+      .references(() => oauthClients.id, { onDelete: 'cascade' }),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    codeHash: text('code_hash').notNull(),
+    redirectUri: text('redirect_uri').notNull(),
+    /** PKCE S256 challenge — required, we don't accept `plain`. */
+    codeChallenge: text('code_challenge').notNull(),
+    /** RFC 8707 audience the client asked for; echoed for bookkeeping only. */
+    resource: text('resource'),
+    scope: text('scope').notNull(),
+    /** DEK wrapped under a key derived from the clear code. */
+    wrappedDek: blob('wrapped_dek', { mode: 'buffer' }),
+    expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+    consumedAt: integer('consumed_at', { mode: 'timestamp' }),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    codeHashIdx: uniqueIndex('oauth_auth_codes_code_hash_idx').on(t.codeHash),
+    expiresIdx: index('oauth_auth_codes_expires_idx').on(t.expiresAt),
+  }),
+)
+
+export const oauthTokens = sqliteTable(
+  'oauth_tokens',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    clientRowId: integer('client_row_id')
+      .notNull()
+      .references(() => oauthClients.id, { onDelete: 'cascade' }),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /**
+     * The authorization code this grant came from. Kept so a replayed code
+     * revokes exactly the tokens it produced (RFC 6749 §10.5) instead of every
+     * token the client holds — a network retry must not nuke a working
+     * connector. Goes null when the code row is GC'd after expiry, by which
+     * point replay is impossible anyway.
+     */
+    authCodeId: integer('auth_code_id').references(() => oauthAuthCodes.id, { onDelete: 'set null' }),
+    accessTokenHash: text('access_token_hash').notNull(),
+    refreshTokenHash: text('refresh_token_hash'),
+    /** DEK wrapped under a key derived from the clear access token. */
+    wrappedDekAccess: blob('wrapped_dek_access', { mode: 'buffer' }),
+    /** Same DEK, wrapped under the refresh token so rotation can re-wrap it. */
+    wrappedDekRefresh: blob('wrapped_dek_refresh', { mode: 'buffer' }),
+    scope: text('scope').notNull(),
+    accessExpiresAt: integer('access_expires_at', { mode: 'timestamp' }).notNull(),
+    refreshExpiresAt: integer('refresh_expires_at', { mode: 'timestamp' }),
+    lastUsedAt: integer('last_used_at', { mode: 'timestamp' }),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    revokedAt: integer('revoked_at', { mode: 'timestamp' }),
+  },
+  (t) => ({
+    accessHashIdx: uniqueIndex('oauth_tokens_access_hash_idx').on(t.accessTokenHash),
+    refreshHashIdx: uniqueIndex('oauth_tokens_refresh_hash_idx').on(t.refreshTokenHash),
+    clientIdx: index('oauth_tokens_client_idx').on(t.clientRowId),
+    userIdx: index('oauth_tokens_user_idx').on(t.userId),
+  }),
+)
+
+/* -------------------------------------------------------------------------- */
 /*  Chat RAG                                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -917,6 +1038,12 @@ export type DocumentVersion = typeof documentVersions.$inferSelect
 export type NewDocumentVersion = typeof documentVersions.$inferInsert
 export type McpToken = typeof mcpTokens.$inferSelect
 export type NewMcpToken = typeof mcpTokens.$inferInsert
+export type OauthClient = typeof oauthClients.$inferSelect
+export type NewOauthClient = typeof oauthClients.$inferInsert
+export type OauthAuthCode = typeof oauthAuthCodes.$inferSelect
+export type NewOauthAuthCode = typeof oauthAuthCodes.$inferInsert
+export type OauthToken = typeof oauthTokens.$inferSelect
+export type NewOauthToken = typeof oauthTokens.$inferInsert
 export type UserPreferences = typeof userPreferences.$inferSelect
 export type NewUserPreferences = typeof userPreferences.$inferInsert
 export type UserTotp = typeof userTotp.$inferSelect

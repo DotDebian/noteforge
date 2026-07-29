@@ -1,10 +1,11 @@
 import type { H3Event } from 'h3'
-import { createError, getRequestHeader } from 'h3'
+import { createError, getRequestHeader, setHeader } from 'h3'
 import { createHash, randomBytes } from 'node:crypto'
 import { and, eq, isNull } from 'drizzle-orm'
 import { useDb } from '~/server/database/client'
 import { mcpTokens, users, type User } from '~/server/database/schema'
 import { deriveTokenWrapKey, unwrap } from './crypto'
+import { ACCESS_TOKEN_PREFIX, publicOrigin, resolveOauthAccessToken } from './oauth'
 
 /**
  * MCP bearer tokens. Distinct from password hashing in `auth.ts`:
@@ -46,30 +47,71 @@ export interface McpAuthResult {
   user: User
   /** Per-user DEK unwrapped from the token row. `null` for legacy tokens with no wrap. */
   dek: Buffer | null
-  /** Row id of the validated `mcp_tokens` entry — surfaced for call-log attribution. */
-  tokenId: number
+  /**
+   * Row id of the validated `mcp_tokens` entry — surfaced for call-log
+   * attribution. `null` when the caller authenticated with an OAuth access
+   * token instead (`mcp_call_logs.token_id` FKs `mcp_tokens`, so an OAuth
+   * grant id has nowhere to go there; the log still carries `userId`).
+   */
+  tokenId: number | null
+}
+
+/**
+ * 401 carrying the RFC 9728 challenge. MCP clients that speak OAuth (Claude's
+ * custom connectors) bootstrap discovery from this header: they read
+ * `resource_metadata`, fetch it, and follow it to the authorization server.
+ * Without the header, claude.ai has no way to know where to send the user.
+ */
+function unauthorized(event: H3Event, message: string): ReturnType<typeof createError> {
+  setHeader(
+    event,
+    'www-authenticate',
+    `Bearer resource_metadata="${publicOrigin(event)}/.well-known/oauth-protected-resource"`,
+  )
+  return createError({ statusCode: 401, statusMessage: message })
 }
 
 /**
  * Validate the `Authorization: Bearer …` header on an MCP request.
  *
- * Returns the authenticated user (full row) and the unwrapped DEK, or
- * throws 401. Updates `last_used_at` fire-and-forget — the request must
- * not wait on it.
+ * Two credential families are accepted, distinguished by prefix:
+ *  - `nf_…`   — a static token from `mcp_tokens` (Claude Desktop via
+ *               `mcp-remote`, scripts, anything that can set a header),
+ *  - `nfat_…` — an OAuth access token issued by our own authorization server
+ *               (claude.ai custom connectors, which cannot send headers).
+ *
+ * Either way the result is the same shape: the user row plus the DEK unwrapped
+ * from whichever artefact authenticated the call.
  */
 export async function requireMcpUser(event: H3Event): Promise<McpAuthResult> {
   const header = getRequestHeader(event, 'authorization')
     ?? getRequestHeader(event, 'Authorization')
   if (!header || !header.toLowerCase().startsWith('bearer ')) {
-    throw createError({
-      statusCode: 401,
-      statusMessage: 'Missing bearer token',
-    })
+    throw unauthorized(event, 'Missing bearer token')
   }
 
   const token = header.slice(7).trim()
+
+  // OAuth access token — checked first because `nfat_` would otherwise fall
+  // through the `nf_` format guard below and 401 with a misleading message.
+  if (token.startsWith(ACCESS_TOKEN_PREFIX)) {
+    const grant = await resolveOauthAccessToken(token)
+    if (!grant) {
+      throw unauthorized(event, 'Invalid, expired or revoked access token')
+    }
+    const [oauthUser] = await useDb()
+      .select()
+      .from(users)
+      .where(eq(users.id, grant.userId))
+      .limit(1)
+    if (!oauthUser) {
+      throw unauthorized(event, 'User no longer exists')
+    }
+    return { user: oauthUser, dek: grant.dek, tokenId: null }
+  }
+
   if (!token.startsWith('nf_') || token.length < 16) {
-    throw createError({ statusCode: 401, statusMessage: 'Invalid token format' })
+    throw unauthorized(event, 'Invalid token format')
   }
 
   const hash = hashMcpToken(token)
@@ -81,10 +123,7 @@ export async function requireMcpUser(event: H3Event): Promise<McpAuthResult> {
     .limit(1)
 
   if (!row) {
-    throw createError({
-      statusCode: 401,
-      statusMessage: 'Invalid or revoked token',
-    })
+    throw unauthorized(event, 'Invalid or revoked token')
   }
 
   const [user] = await db
@@ -94,7 +133,7 @@ export async function requireMcpUser(event: H3Event): Promise<McpAuthResult> {
     .limit(1)
 
   if (!user) {
-    throw createError({ statusCode: 401, statusMessage: 'User no longer exists' })
+    throw unauthorized(event, 'User no longer exists')
   }
 
   let dek: Buffer | null = null
@@ -105,10 +144,7 @@ export async function requireMcpUser(event: H3Event): Promise<McpAuthResult> {
     }
     catch (err) {
       console.error('[mcp-auth] failed to unwrap DEK for token', row.id, err)
-      throw createError({
-        statusCode: 401,
-        statusMessage: 'Token cannot decrypt data — revoke and re-issue',
-      })
+      throw unauthorized(event, 'Token cannot decrypt data — revoke and re-issue')
     }
   }
 

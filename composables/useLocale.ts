@@ -486,9 +486,15 @@ const en: Messages = {
   /* ----------------------------- MCP ----------------------------- */
   'mcp.openTitle': 'Install MCP server',
   'mcp.eyebrow': 'MCP server',
-  'mcp.title': 'Connect Claude Desktop to your notes.',
+  'mcp.title': 'Connect Claude to your notes.',
   'mcp.lede':
-    'Three steps: generate a bearer token, drop the snippet into Claude Desktop’s config, restart. Each token can be revoked at any time.',
+    'Pick how the client authenticates, then follow the three steps. Every token and connector can be revoked at any time.',
+
+  'mcp.mode.label': 'Choose an authentication method',
+  'mcp.mode.bearer.title': 'Bearer token',
+  'mcp.mode.bearer.lede': 'Claude Desktop, scripts, anything that can send a header.',
+  'mcp.mode.oauth.title': 'OAuth connector',
+  'mcp.mode.oauth.lede': 'claude.ai custom connector — URL, client ID, client secret.',
   'mcp.nameLabel': 'Token label (optional)',
   'mcp.namePlaceholder': 'e.g. "Laptop", "Claude Desktop"',
   'mcp.generate': 'Generate token',
@@ -530,6 +536,58 @@ const en: Messages = {
   'mcp.revoke.failedMsg': 'The token could not be revoked.',
   'mcp.errorLoad': 'Couldn’t load MCP tokens.',
   'mcp.errorCreate': 'Couldn’t generate token.',
+
+  /* ------------------- MCP — OAuth custom connector ------------------ */
+  'mcp.oauth.step1.title': 'Register a connector',
+  'mcp.oauth.step1.lede':
+    'Claude gets its own client ID and secret. The secret is shown once — copy it before moving on.',
+  'mcp.oauth.nameLabel': 'Connector label (optional)',
+  'mcp.oauth.namePlaceholder': 'e.g. "claude.ai", "Work laptop"',
+  'mcp.oauth.generate': 'Create connector',
+  'mcp.oauth.fresh.eyebrow': 'New secret — shown once',
+  'mcp.oauth.fresh.title': 'Your new client secret',
+  'mcp.oauth.fresh.warn':
+    'Copy the client secret below now. For security it’s never displayed again — if you lose it, revoke the connector and create a new one.',
+  'mcp.oauth.step2.title': 'Add the connector in Claude',
+  'mcp.oauth.step2.lede':
+    'In Claude: Settings → Connectors → Add custom connector. Paste the URL, open Advanced settings, then paste the client ID and secret.',
+  'mcp.oauth.field.url': 'Remote MCP server URL',
+  'mcp.oauth.field.clientId': 'OAuth client ID',
+  'mcp.oauth.field.clientSecret': 'OAuth client secret',
+  'mcp.oauth.field.pending': 'Create a connector first',
+  'mcp.oauth.field.secretGone': 'Shown once at creation',
+  'mcp.oauth.field.secretGoneHint':
+    'Lost the secret? Revoke this connector and create a new one — the secret can’t be recovered.',
+  'mcp.oauth.step3.title': 'Connect and authorize',
+  'mcp.oauth.step3.lede':
+    'Hit Connect in Claude. You’ll land on a NoteForge consent page — approve it and the connector is live.',
+  'mcp.oauth.list.title': 'Active connectors',
+  'mcp.oauth.list.loading': 'Loading connectors…',
+  'mcp.oauth.list.empty': 'No connectors yet — create one above to connect claude.ai.',
+  'mcp.oauth.revoke.title': 'Revoke this connector?',
+  'mcp.oauth.revoke.message':
+    'Claude will lose access through {label} immediately, and its existing sessions are cut off. This cannot be undone.',
+  'mcp.oauth.errorCreate': 'Couldn’t create connector.',
+
+  /* --------------------- OAuth consent screen ----------------------- */
+  'oauth.consent.head': 'Authorize connector',
+  'oauth.consent.eyebrow': 'Connector access',
+  'oauth.consent.title': 'Give {connector} access to your notes?',
+  'oauth.consent.lede':
+    'This will let {host} read and write your NoteForge workspaces through the MCP server.',
+  'oauth.consent.unnamedConnector': 'this connector',
+  'oauth.consent.grantRead': 'Read your workspaces, folders and documents',
+  'oauth.consent.grantWrite': 'Create, edit and trash documents and folders',
+  'oauth.consent.grantSearch': 'Search your notes and run AI analysis',
+  'oauth.consent.account': 'Signed in as {account}',
+  'oauth.consent.revokeHint': 'You can revoke this connector at any time from the MCP server dialog.',
+  'oauth.consent.approve': 'Authorize',
+  'oauth.consent.approving': 'Authorizing…',
+  'oauth.consent.deny': 'Deny',
+  'oauth.consent.invalidTitle': 'This request can’t be authorized',
+  'oauth.consent.invalidRequest': 'The authorization request is invalid or has expired.',
+  'oauth.consent.errorGeneric': 'Authorization failed. Try connecting again from Claude.',
+  'oauth.consent.backHome': 'Back to NoteForge',
 
   /* ----------------------------- Journal ----------------------------- */
   'journal.title': 'Journal',
@@ -1170,9 +1228,15 @@ const fr: Messages = {
   /* ----------------------------- MCP ----------------------------- */
   'mcp.openTitle': 'Installer le serveur MCP',
   'mcp.eyebrow': 'Serveur MCP',
-  'mcp.title': 'Connecter Claude Desktop à vos notes.',
+  'mcp.title': 'Connecter Claude à vos notes.',
   'mcp.lede':
-    'Trois étapes : générer un token bearer, coller le snippet dans la config de Claude Desktop, redémarrer. Chaque token peut être révoqué à tout moment.',
+    'Choisissez la méthode d’authentification du client, puis suivez les trois étapes. Tokens et connecteurs sont révocables à tout moment.',
+
+  'mcp.mode.label': 'Choisissez une méthode d’authentification',
+  'mcp.mode.bearer.title': 'Token bearer',
+  'mcp.mode.bearer.lede': 'Claude Desktop, scripts, tout client capable d’envoyer un en-tête.',
+  'mcp.mode.oauth.title': 'Connecteur OAuth',
+  'mcp.mode.oauth.lede': 'Connecteur personnalisé claude.ai — URL, ID client, secret client.',
   'mcp.nameLabel': 'Étiquette du token (optionnel)',
   'mcp.namePlaceholder': 'ex. "Portable", "Claude Desktop"',
   'mcp.generate': 'Générer un token',
@@ -1214,6 +1278,58 @@ const fr: Messages = {
   'mcp.revoke.failedMsg': 'Le token n’a pas pu être révoqué.',
   'mcp.errorLoad': 'Impossible de charger les tokens MCP.',
   'mcp.errorCreate': 'Impossible de générer le token.',
+
+  /* ------------------- MCP — connecteur OAuth ----------------------- */
+  'mcp.oauth.step1.title': 'Créer un connecteur',
+  'mcp.oauth.step1.lede':
+    'Claude reçoit son propre ID client et son secret. Le secret n’est affiché qu’une seule fois — copiez-le avant de continuer.',
+  'mcp.oauth.nameLabel': 'Étiquette du connecteur (optionnel)',
+  'mcp.oauth.namePlaceholder': 'ex. "claude.ai", "Portable pro"',
+  'mcp.oauth.generate': 'Créer le connecteur',
+  'mcp.oauth.fresh.eyebrow': 'Nouveau secret — affiché une seule fois',
+  'mcp.oauth.fresh.title': 'Votre nouveau secret client',
+  'mcp.oauth.fresh.warn':
+    'Copiez le secret client ci-dessous maintenant. Par sécurité, il ne sera plus jamais affiché — en cas de perte, révoquez le connecteur et créez-en un nouveau.',
+  'mcp.oauth.step2.title': 'Ajouter le connecteur dans Claude',
+  'mcp.oauth.step2.lede':
+    'Dans Claude : Paramètres → Connecteurs → Ajouter un connecteur personnalisé. Collez l’URL, ouvrez les paramètres avancés, puis collez l’ID client et le secret.',
+  'mcp.oauth.field.url': 'URL du serveur MCP distant',
+  'mcp.oauth.field.clientId': 'ID client OAuth',
+  'mcp.oauth.field.clientSecret': 'Secret client OAuth',
+  'mcp.oauth.field.pending': 'Créez d’abord un connecteur',
+  'mcp.oauth.field.secretGone': 'Affiché une seule fois à la création',
+  'mcp.oauth.field.secretGoneHint':
+    'Secret perdu ? Révoquez ce connecteur et créez-en un nouveau — le secret est irrécupérable.',
+  'mcp.oauth.step3.title': 'Connecter et autoriser',
+  'mcp.oauth.step3.lede':
+    'Cliquez sur Connecter dans Claude. Une page de consentement NoteForge s’ouvre — validez-la et le connecteur est actif.',
+  'mcp.oauth.list.title': 'Connecteurs actifs',
+  'mcp.oauth.list.loading': 'Chargement des connecteurs…',
+  'mcp.oauth.list.empty': 'Aucun connecteur pour l’instant — créez-en un ci-dessus pour connecter claude.ai.',
+  'mcp.oauth.revoke.title': 'Révoquer ce connecteur ?',
+  'mcp.oauth.revoke.message':
+    'Claude perdra immédiatement l’accès via {label}, et ses sessions en cours seront coupées. Cette action est irréversible.',
+  'mcp.oauth.errorCreate': 'Impossible de créer le connecteur.',
+
+  /* ------------------ Page de consentement OAuth -------------------- */
+  'oauth.consent.head': 'Autoriser le connecteur',
+  'oauth.consent.eyebrow': 'Accès connecteur',
+  'oauth.consent.title': 'Donner à {connector} l’accès à vos notes ?',
+  'oauth.consent.lede':
+    'Cela autorisera {host} à lire et écrire dans vos espaces NoteForge via le serveur MCP.',
+  'oauth.consent.unnamedConnector': 'ce connecteur',
+  'oauth.consent.grantRead': 'Lire vos espaces, dossiers et documents',
+  'oauth.consent.grantWrite': 'Créer, modifier et mettre à la corbeille documents et dossiers',
+  'oauth.consent.grantSearch': 'Rechercher dans vos notes et lancer l’analyse IA',
+  'oauth.consent.account': 'Connecté en tant que {account}',
+  'oauth.consent.revokeHint': 'Vous pouvez révoquer ce connecteur à tout moment depuis la modal Serveur MCP.',
+  'oauth.consent.approve': 'Autoriser',
+  'oauth.consent.approving': 'Autorisation…',
+  'oauth.consent.deny': 'Refuser',
+  'oauth.consent.invalidTitle': 'Cette demande ne peut pas être autorisée',
+  'oauth.consent.invalidRequest': 'La demande d’autorisation est invalide ou a expiré.',
+  'oauth.consent.errorGeneric': 'Échec de l’autorisation. Relancez la connexion depuis Claude.',
+  'oauth.consent.backHome': 'Retour à NoteForge',
 
   /* ----------------------------- Journal ----------------------------- */
   'journal.title': 'Journal',

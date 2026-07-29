@@ -16,6 +16,7 @@ import { useDb } from '~/server/database/client'
 import { documents, folders, type DocAnalysis, type Document, type User } from '~/server/database/schema'
 import { requireMcpUser } from '~/server/utils/mcpAuth'
 import { logMcpCall } from '~/server/utils/mcpCalls'
+import { setOauthCors } from '~/server/utils/oauth'
 import { getWorkspaceKeyForUserById, type WorkspaceKeyCache } from '~/server/utils/workspace-key'
 import {
   analyzeUserDocument,
@@ -113,7 +114,7 @@ function localDateString(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer {
+function buildServer(user: User, dek: Buffer | null, tokenId: number | null): McpServer {
   const server = new McpServer({
     name: 'noteforge',
     version: '0.1.0',
@@ -174,13 +175,13 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number): McpServer
       const start = Date.now()
       try {
         const result = await handler(args)
-        logMcpCall({ tokenId, userId: user.id, toolName, success: true, latencyMs: Date.now() - start })
+        logMcpCall({ tokenId: tokenId ?? undefined, userId: user.id, toolName, success: true, latencyMs: Date.now() - start })
         return result
       }
       catch (err) {
         const code = (err as { statusCode?: number | string }).statusCode
         const errorCode = code != null ? String(code) : 'internal'
-        logMcpCall({ tokenId, userId: user.id, toolName, success: false, latencyMs: Date.now() - start, errorCode })
+        logMcpCall({ tokenId: tokenId ?? undefined, userId: user.id, toolName, success: false, latencyMs: Date.now() - start, errorCode })
         throw err
       }
     }
@@ -567,8 +568,18 @@ async function toWebRequest(event: Parameters<Parameters<typeof defineEventHandl
 }
 
 export default defineEventHandler(async (event) => {
-  const { user, dek, tokenId } = await requireMcpUser(event)
   const method = getMethod(event)
+
+  // Preflight has to answer BEFORE auth — browsers never attach the
+  // Authorization header to an OPTIONS probe, so authenticating first would
+  // 401 every cross-origin client (MCP Inspector, browser-side transports).
+  setOauthCors(event)
+  if (method === 'OPTIONS') {
+    setResponseStatus(event, 204)
+    return null
+  }
+
+  const { user, dek, tokenId } = await requireMcpUser(event)
 
   // The transport implements POST (RPC messages), GET (server-initiated SSE
   // stream) and DELETE (session termination). Reject anything else early so
