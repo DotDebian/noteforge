@@ -61,6 +61,16 @@ const Body = z.object({
   folderId: z.number().int().positive().nullable().optional(),
   // Move target workspace. Omitted = each doc keeps its own workspace.
   workspaceId: z.number().int().positive().optional(),
+  /**
+   * move only — per-document destinations, for when the batch does NOT share
+   * one target (undo of a move, restoring a previous layout). Takes precedence
+   * over `docIds` / `folderIds` / `folderId` / `workspaceId`.
+   */
+  placements: z.array(z.object({
+    docId: z.number().int().positive(),
+    workspaceId: z.number().int().positive(),
+    folderId: z.number().int().positive().nullable(),
+  })).min(1).max(500).optional(),
   tag: z.string().trim().min(1).max(80).optional(),
 })
 
@@ -78,6 +88,32 @@ export default defineEventHandler(async (event) => {
   const user = await requireUser(event)
   const dek = await getDek(event)
   const db = useDb()
+
+  /* -------- action: move with per-document destinations -------- */
+  // Handled before the folder expansion below: `placements` carries its own
+  // doc ids and each one has its own target, so none of the batch-wide
+  // resolution applies.
+  if (input.action === 'move' && input.placements) {
+    const keyCache = (event.context as unknown) as WorkspaceKeyCache
+    const result: BulkResult = { ok: [], errors: [], revokedShareTokens: 0 }
+    for (const p of input.placements) {
+      try {
+        const moved = await moveUserDocument(
+          user.id,
+          p.docId,
+          { workspaceId: p.workspaceId, folderId: p.folderId },
+          dek,
+          keyCache,
+        )
+        result.revokedShareTokens = (result.revokedShareTokens ?? 0) + moved.revokedShareTokens
+        result.ok.push(p.docId)
+      }
+      catch (err) {
+        result.errors.push({ docId: p.docId, message: (err as Error).message || 'failed' })
+      }
+    }
+    return result
+  }
 
   // Expand any selected folders into the active notes they contain (recursive),
   // then union with the explicitly-selected docs. So selecting a folder acts on
