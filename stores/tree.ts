@@ -1,5 +1,5 @@
 import { acceptHMRUpdate, defineStore } from 'pinia'
-import type { Folder, Document } from '~/server/database/schema'
+import type { Folder, Document, DocumentType } from '~/server/database/schema'
 
 export interface FolderNode extends Folder {
   children: FolderNode[]
@@ -124,7 +124,9 @@ export const useTreeStore = defineStore('tree', {
       return created
     },
 
-    async createDocument(input: { title?: string, folderId?: number | null }): Promise<Document> {
+    async createDocument(
+      input: { title?: string, folderId?: number | null, type?: DocumentType },
+    ): Promise<Document> {
       if (this.workspaceId == null) throw new Error('No active workspace')
       const res = await $fetch<{ document: Document }>('/api/documents', {
         method: 'POST',
@@ -132,6 +134,9 @@ export const useTreeStore = defineStore('tree', {
           workspaceId: this.workspaceId,
           folderId: input.folderId ?? null,
           title: input.title ?? 'Untitled',
+          // Omitted server-side means 'markdown'; only send it when it differs
+          // so existing callers keep their exact request shape.
+          ...(input.type && input.type !== 'markdown' ? { type: input.type } : {}),
         },
       })
       const created = res.document

@@ -13,7 +13,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { eq } from 'drizzle-orm'
 import { useDb } from '~/server/database/client'
-import { documents, folders, type DocAnalysis, type Document, type User } from '~/server/database/schema'
+import { documents, folders, DOCUMENT_TYPES, type DocAnalysis, type Document, type DocumentType, type User } from '~/server/database/schema'
 import { requireMcpUser } from '~/server/utils/mcpAuth'
 import { logMcpCall } from '~/server/utils/mcpCalls'
 import { setOauthCors } from '~/server/utils/oauth'
@@ -27,6 +27,7 @@ import {
   findUserDocuments,
   getUserDocument,
   getUserDocumentLinks,
+  getUserDrawing,
   getUserOverview,
   getUserWorkspace,
   listUserDocuments,
@@ -37,9 +38,11 @@ import {
   softDeleteUserDocument,
   softDeleteUserFolder,
   updateUserDocument,
+  updateUserDrawing,
   updateUserFolder,
   type WorkspaceListItem,
 } from '~/server/utils/notes'
+import { parseExcalidrawScene, stripEmbeddedDataUrls } from '~/utils/excalidraw-scene'
 
 /* -------------------------------------------------------------------------- */
 /*  MCP server (HTTP streamable transport)                                     */
@@ -90,7 +93,11 @@ function jsonResult(payload: unknown) {
 
 function toMcpDocument(doc: Document): Omit<Document, 'contentJson'> {
   const { contentJson: _contentJson, ...rest } = doc
-  return rest
+  // A drawing's markdown ends in a PNG data URL (~50-150 KB of base64). Left in
+  // place it would dominate — sometimes overflow — the tool response for no
+  // readable gain. The text of the drawing survives; use read_drawing for the
+  // scene itself.
+  return { ...rest, markdown: stripEmbeddedDataUrls(rest.markdown) }
 }
 
 /** Metadata only — drops the body too. Used by write tools whose whole point
@@ -326,20 +333,25 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number | null): Mc
     'create_document',
     {
       title: 'Create document',
-      description: 'Create a new document in a workspace, optionally inside a folder.',
+      description:
+        'Create a new document in a workspace, optionally inside a folder. Set `type` to "excalidraw" '
+        + 'to create a drawing instead of a note — it starts as an empty canvas; fill it with '
+        + 'write_drawing. `markdown` is ignored for drawings (their body is generated from the scene).',
       inputSchema: {
         workspaceId: z.number().int().positive(),
         folderId: z.number().int().positive().nullable().optional(),
         title: z.string().trim().min(1).max(200).optional(),
+        type: z.enum(DOCUMENT_TYPES).optional(),
         markdown: z.string().max(2_000_000).optional(),
       },
     },
-    instrument('create_document', async ({ workspaceId, folderId, title, markdown }: { workspaceId: number, folderId?: number | null, title?: string, markdown?: string }) => jsonResult({
+    instrument('create_document', async ({ workspaceId, folderId, title, type, markdown }: { workspaceId: number, folderId?: number | null, title?: string, type?: DocumentType, markdown?: string }) => jsonResult({
       document: toMcpDocument(await createUserDocument(user.id, {
         workspaceId,
         folderId: folderId ?? null,
         title,
-        markdown,
+        type,
+        markdown: type === 'excalidraw' ? undefined : markdown,
       }, await keyForWorkspace(workspaceId))),
     })),
   )
@@ -437,6 +449,73 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number | null): Mc
         warnings: result.warnings,
         lengthBefore: result.lengthBefore,
         lengthAfter: result.lengthAfter,
+      })
+    }),
+  )
+
+  /* ---------- Drawings (type = 'excalidraw') ------------------------------ */
+
+  server.registerTool(
+    'read_drawing',
+    {
+      title: 'Read drawing (Excalidraw scene)',
+      description:
+        'Read the full Excalidraw scene of a drawing document, in the standard `.excalidraw` JSON shape '
+        + '(`{ type, version, source, elements, appState, files }`). This is the only way to see a '
+        + 'drawing\'s geometry — read_document returns just its text. Scenes are large: read one when you '
+        + 'intend to modify it, and prefer the `text` field when you only need to know what it says. '
+        + 'Fails if the document is a normal note.',
+      inputSchema: {
+        documentId: z.number().int().positive(),
+      },
+    },
+    instrument('read_drawing', async ({ documentId }: { documentId: number }) => {
+      const { document, scene, text } = await getUserDrawing(
+        user.id,
+        documentId,
+        { includeTrashed: false },
+        await keyForDocument(documentId),
+      )
+      return jsonResult({ document: toMcpDocumentMeta(document), scene, text })
+    }),
+  )
+
+  server.registerTool(
+    'write_drawing',
+    {
+      title: 'Write drawing (Excalidraw scene)',
+      description:
+        'REPLACE the whole scene of a drawing document. `scene` is a JSON string in `.excalidraw` shape — '
+        + 'at minimum `{"type":"excalidraw","version":2,"elements":[...]}`. There is no partial update: '
+        + 'read_drawing first, modify the elements array, send the result back.\n'
+        + 'NOTE — the rendered preview image cannot be regenerated headlessly, so it is dropped on write. '
+        + 'The drawing\'s text stays searchable immediately; the image comes back the next time somebody '
+        + 'opens the document in NoteForge. Fails if the document is a normal note.',
+      inputSchema: {
+        documentId: z.number().int().positive(),
+        scene: z.string().min(2).max(4_000_000),
+      },
+    },
+    instrument('write_drawing', async ({ documentId, scene }: { documentId: number, scene: string }) => {
+      const parsed = parseExcalidrawScene(scene)
+      if (!parsed) {
+        throw createError({
+          statusCode: 400,
+          statusMessage: 'Invalid Excalidraw scene',
+          message:
+            '`scene` must be JSON carrying an `elements` array, e.g. '
+            + '{"type":"excalidraw","version":2,"elements":[],"appState":{},"files":{}}.',
+        })
+      }
+      const document = await updateUserDrawing(
+        user.id,
+        documentId,
+        parsed,
+        await keyForDocument(documentId),
+      )
+      return jsonResult({
+        document: toMcpDocumentMeta(document),
+        elementCount: parsed.elements.filter(el => el && !el.isDeleted).length,
       })
     }),
   )

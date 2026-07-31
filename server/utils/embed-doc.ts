@@ -16,6 +16,7 @@
 import { eq, sql } from 'drizzle-orm'
 import { getRawDb, isVecAvailable, useDb } from '~/server/database/client'
 import { docChunks } from '~/server/database/schema'
+import { stripEmbeddedDataUrls } from '~/utils/excalidraw-scene'
 import { chunkMarkdown } from './chunking'
 import { encryptChunkText } from './encrypted-entities'
 import { mistralEmbed } from './mistral'
@@ -53,7 +54,11 @@ export async function embedDocument(
   userId?: number,
 ): Promise<number> {
   const db = useDb()
-  const chunks = chunkMarkdown(markdown)
+  // Drawings (and legacy in-note whiteboards) carry a PNG data URL in their
+  // markdown. Embedding base64 wastes a Mistral call on noise and floods the
+  // FTS5 mirror with meaningless tokens that then win BM25 matches — strip the
+  // payloads and keep only what a human could read.
+  const chunks = chunkMarkdown(stripEmbeddedDataUrls(markdown))
 
   /* ----- 1. Snapshot the chunk_ids we're about to remove ------------------ */
   // We need them so we can scrub the matching vec0 + FTS5 rows. Doing this

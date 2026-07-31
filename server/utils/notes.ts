@@ -33,10 +33,21 @@ import {
   workspaceShares,
   type DocAnalysis,
   type Document,
+  type DocumentType,
   type Folder,
   type Workspace,
   type WorkspaceRole,
 } from '~/server/database/schema'
+import {
+  buildDrawingMarkdown,
+  emptyExcalidrawScene,
+  extractSceneText,
+  isEffectivelyEmptyForAi,
+  parseExcalidrawScene,
+  serializeExcalidrawScene,
+  stripEmbeddedDataUrls,
+  type ExcalidrawScene,
+} from '~/utils/excalidraw-scene'
 import { getWorkspaceKeyForUser, type WorkspaceKeyCache } from './workspace-key'
 import {
   assertCanEdit,
@@ -232,6 +243,8 @@ export type DocumentListRow = {
   workspaceId: number
   folderId: number | null
   title: string
+  /** Drives the sidebar icon and which editor the document page mounts. */
+  type: DocumentType
   position: number
   createdAt: Date
   updatedAt: Date
@@ -275,6 +288,7 @@ export async function listUserDocuments(
       workspaceId: documents.workspaceId,
       folderId: documents.folderId,
       title: documents.title,
+      type: documents.type,
       position: documents.position,
       createdAt: documents.createdAt,
       updatedAt: documents.updatedAt,
@@ -322,6 +336,8 @@ export interface CreateDocumentInput {
   workspaceId: number
   folderId?: number | null
   title?: string
+  /** Defaults to `'markdown'`. `'excalidraw'` seeds an empty scene. */
+  type?: DocumentType
   markdown?: string
   contentJson?: string
   position?: number
@@ -347,9 +363,15 @@ export async function createUserDocument(
 
   const db = useDb()
   const now = new Date()
+  const type: DocumentType = input.type ?? 'markdown'
   const plainTitle = input.title ?? 'Untitled'
   const plainMarkdown = input.markdown ?? ''
-  const plainContentJson = input.contentJson ?? '{}'
+  // A drawing's content_json IS its scene, so an empty document has to start
+  // from a valid scene rather than the `'{}'` Tiptap default — otherwise the
+  // first save would have nothing to merge into and the editor would have to
+  // special-case "never opened".
+  const plainContentJson = input.contentJson
+    ?? (type === 'excalidraw' ? serializeExcalidrawScene(emptyExcalidrawScene()) : '{}')
   const encrypted = encryptDocument(
     { title: plainTitle, markdown: plainMarkdown, contentJson: plainContentJson },
     dek,
@@ -360,6 +382,7 @@ export async function createUserDocument(
       workspaceId: workspace.id,
       folderId: input.folderId ?? null,
       title: encrypted.title!,
+      type,
       markdown: encrypted.markdown!,
       contentJson: encrypted.contentJson!,
       position: input.position ?? 0,
@@ -418,6 +441,25 @@ export async function updateUserDocument(
     throw createError({
       statusCode: 400,
       statusMessage: 'folderId and position cannot be updated in the same request',
+    })
+  }
+
+  // For a drawing, `markdown` is DERIVED from `content_json`. A caller that
+  // sends markdown alone (MCP `update_document`, a hand-rolled PATCH) would
+  // have its text silently discarded on the next canvas edit — so refuse it.
+  // The pair (markdown + contentJson) is what the editor and `updateUserDrawing`
+  // send, and that is allowed.
+  if (
+    doc.type !== 'markdown'
+    && input.markdown !== undefined
+    && input.contentJson === undefined
+  ) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: 'Markdown is derived for this document type',
+      message:
+        `Document ${docId} is a ${doc.type} document: its markdown is generated from its scene and `
+        + 'would be overwritten. Use write_drawing to change it.',
     })
   }
 
@@ -527,6 +569,99 @@ export async function updateUserDocument(
   }
 
   return decryptDocument(updated, dek)
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Drawings (type = 'excalidraw')                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Refuse a markdown-shaped write against a drawing.
+ *
+ * For a drawing, `markdown` is DERIVED from `content_json` and rewritten on
+ * every save (see `utils/excalidraw-scene.ts`). A blind append or unified-diff
+ * patch would therefore either be silently discarded on the next save, or —
+ * worse — land in the middle of a base64 data URL. Both `appendToUserDocument`
+ * and `patchUserDocument` are reachable from MCP, so the guard lives here in
+ * the service layer rather than in one transport.
+ */
+export function assertMarkdownDocument(doc: Document, verb: string): void {
+  if (doc.type === 'markdown') return
+  throw createError({
+    statusCode: 400,
+    statusMessage: 'Not a markdown document',
+    message:
+      `Cannot ${verb} document ${doc.id}: it is a ${doc.type} document, whose markdown is `
+      + 'generated from its scene and would be overwritten. Use the drawing tools '
+      + '(read_drawing / write_drawing) instead.',
+  })
+}
+
+export interface DrawingPayload {
+  document: Document
+  scene: ExcalidrawScene
+  /** Text elements in reading order — cheap context for a caller that only
+   *  wants to know what the drawing says. */
+  text: string[]
+}
+
+/**
+ * Read a drawing's scene. Returns a blank scene rather than throwing when the
+ * column is unreadable (a half-written row, a restore from a pre-drawing
+ * version snapshot), so the editor always has something to mount.
+ */
+export async function getUserDrawing(
+  userId: number,
+  docId: number,
+  { includeTrashed = true }: { includeTrashed?: boolean } = {},
+  dek: Buffer | null = null,
+): Promise<DrawingPayload> {
+  const { document } = await getUserDocument(userId, docId, { includeTrashed }, dek)
+  if (document.type !== 'excalidraw') {
+    throw createError({
+      statusCode: 400,
+      statusMessage: 'Not a drawing',
+      message: `Document ${docId} is a ${document.type} document, not a drawing.`,
+    })
+  }
+  const scene = parseExcalidrawScene(document.contentJson) ?? emptyExcalidrawScene()
+  return { document, scene, text: extractSceneText(scene) }
+}
+
+/**
+ * Replace a drawing's scene.
+ *
+ * `markdown` is regenerated from the new scene. A headless caller (MCP) has no
+ * canvas, so it cannot supply a PNG — rather than keep a preview that no longer
+ * matches the drawing, we drop it and let the browser regenerate one the next
+ * time the document is opened (`ExcalidrawEditor` self-heals a missing
+ * preview). Exports taken in between show the drawing's text but no image.
+ */
+export async function updateUserDrawing(
+  userId: number,
+  docId: number,
+  scene: ExcalidrawScene,
+  dek: Buffer | null = null,
+  { preview }: { preview?: string } = {},
+): Promise<Document> {
+  const { document: raw } = await assertDocumentMembership(userId, docId)
+  if (raw.type !== 'excalidraw') {
+    throw createError({
+      statusCode: 400,
+      statusMessage: 'Not a drawing',
+      message: `Document ${docId} is a ${raw.type} document, not a drawing.`,
+    })
+  }
+  const title = decryptDocument(raw, dek).title ?? ''
+  return updateUserDocument(
+    userId,
+    docId,
+    {
+      contentJson: serializeExcalidrawScene(scene),
+      markdown: buildDrawingMarkdown({ scene, preview, title }),
+    },
+    dek,
+  )
 }
 
 /**
@@ -1112,6 +1247,7 @@ export async function appendToUserDocument(
   if (raw.deletedAt != null) {
     throw createError({ statusCode: 400, statusMessage: 'Document is in trash' })
   }
+  assertMarkdownDocument(raw, 'append to')
 
   const current = decryptDocument(raw, dek).markdown ?? ''
   const addition = markdown.replace(/^\n+/, '')
@@ -1159,6 +1295,7 @@ export async function patchUserDocument(
   if (raw.deletedAt != null) {
     throw createError({ statusCode: 400, statusMessage: 'Document is in trash' })
   }
+  assertMarkdownDocument(raw, 'patch')
 
   const current = decryptDocument(raw, dek).markdown ?? ''
 
@@ -1466,9 +1603,16 @@ export async function analyzeUserDocument(
   if (doc.deletedAt != null) {
     throw createError({ statusCode: 400, statusMessage: 'Document is in trash' })
   }
-  const md = (doc.markdown ?? '').trim()
-  if (md.length === 0) {
-    throw createError({ statusCode: 400, statusMessage: 'Document is empty' })
+  // A drawing's markdown ends in a PNG data URL (~50-150 KB of base64). Send it
+  // as-is and the prompt is mostly padding: cost, latency and a summary of
+  // nothing. `stripEmbeddedDataUrls` leaves the drawing's text behind, which is
+  // the only part worth analysing.
+  const md = stripEmbeddedDataUrls(doc.markdown ?? '').trim()
+  if (md.length === 0 || isEffectivelyEmptyForAi(md)) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: doc.type === 'excalidraw' ? 'Drawing has no text to analyse' : 'Document is empty',
+    })
   }
 
   const userPrompt = `Title: ${doc.title}\n\n---\n\n${md}`

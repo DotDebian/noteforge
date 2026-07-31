@@ -54,15 +54,18 @@ Vraie barre d'outils tableau dans l'éditeur :
 
 Côté technique : `components/editor/extensions/table.ts` (Tiptap Table + TableRow + TableHeader + TableCell étendus d'un attribut `textAlign`), règle `gfmTable` dans `composables/useEditorMarkdown.ts`.
 
-### Tableau blanc / dessin
-Insertion d'un dessin éditable directement dans un document (slash `/draw`).
+### Documents Excalidraw
+Un dessin est un **document à part entière**, pas un bloc dans une note : menu `+` › « Nouvel Excalidraw » (à la racine, ou dans le menu `…` d'un dossier).
 
-- Outils : crayon, rectangle, ellipse, flèche, post-it (sticky note), texte, sélection, suppression, undo, clear.
-- La scène est conservée dans le document en base64 (`data-scene`) — fonctionne hors-ligne.
-- Une prévisualisation PNG (`data-preview`) est générée à chaque sauvegarde et réutilisée par les exports PDF/DOCX.
-- Historique d'undo en mémoire (40 snapshots roulants).
+- Tout l'outillage Excalidraw : formes, texte manuscrit, flèches liées, bibliothèque, alignement, images collées, undo/redo, zoom. Thème et langue alignés sur ceux de l'app.
+- `documents.type` vaut `'excalidraw'` ; la scène `.excalidraw` vit dans `content_json` (chiffré au repos comme le reste).
+- `markdown` est **dérivé** à chaque sauvegarde : le texte du dessin en ordre de lecture, puis un PNG en data-URL (≤ 720 px / 200 Ko). C'est ce qui fait que la recherche, le RAG, `![[transclusion]]`, le partage public et les exports md/HTML/PDF/DOCX marchent sur un dessin sans code spécifique.
+- Pilotable en MCP : `create_document(type)`, `read_drawing`, `write_drawing`. Les écritures markdown (`append_to_document`, `patch_document`, `update_document`) sont refusées sur un dessin — elles seraient écrasées à la prochaine modif du canevas.
+- Les chemins qui transforment le markdown en tokens ou en index (analyse Mistral, chunking/embedding, FTS5, réponses MCP, snippets de recherche) passent par `stripEmbeddedDataUrls` : jamais de base64 dans un prompt ni dans un index.
 
-Côté technique : `components/editor/extensions/whiteboard.ts` + `WhiteboardNodeView.vue` (Konva chargé dynamiquement en `onMounted` pour éviter le SSR).
+Côté technique : `components/editor/ExcalidrawEditor.vue` + le module pur `utils/excalidraw-scene.ts` (testé). React, react-dom et Excalidraw sont importés dynamiquement à la première ouverture d'un dessin (hors bundle SSR **et** hors chunk principal). Les polices sont auto-hébergées via `scripts/copy-excalidraw-assets.mjs` → `public/excalidraw/` (`window.EXCALIDRAW_ASSET_PATH`), sinon Excalidraw les téléchargerait depuis esm.sh.
+
+**Avant**, un tableau blanc s'insérait dans une note (slash `/draw`) et était dessiné avec Konva. Cette insertion a été retirée : un dessin enterré dans une note était inatteignable en MCP et alourdissait la note. Konva n'est plus une dépendance ; les blocs déjà présents dans d'anciennes notes restent affichés en lecture seule à partir de leur `data-preview`, avec un bouton « Convertir en image ».
 
 ### Transclusion d'un autre document — `![[doc]]`
 Affiche le contenu d'un autre document directement à l'intérieur du document courant.

@@ -41,6 +41,14 @@ const { data, pending, error, refresh } = await useFetch<DocResponse>(
 )
 const doc = computed(() => data.value?.document ?? null)
 
+/**
+ * Drawings mount `<ExcalidrawEditor>` instead of `<DocumentEditor>`, and the
+ * right rail drops the panels that only make sense for prose: the outline reads
+ * headings off a Tiptap instance that does not exist here, and the insights
+ * panel would keep proposing an AI analysis of a canvas.
+ */
+const isDrawing = computed(() => doc.value?.type === 'excalidraw')
+
 // Locally tracked title so changes from the editor (via @update:title) show
 // in the crumbs / sidebar / tab title without waiting for a refetch.
 const liveTitle = ref<string>('')
@@ -371,7 +379,15 @@ onBeforeUnmount(endRailResize)
       </div>
 
       <ClientOnly v-else-if="doc">
+        <ExcalidrawEditor
+          v-if="isDrawing"
+          :key="`${doc.id}-${editorVersionKey}`"
+          :doc="doc"
+          @update:title="onTitleChange"
+          @update:markdown="onMarkdownChange"
+        />
         <DocumentEditor
+          v-else
           ref="editorComp"
           :key="`${doc.id}-${editorVersionKey}`"
           :doc="doc"
@@ -405,9 +421,9 @@ onBeforeUnmount(endRailResize)
       class="doc-rail"
       :style="{ width: railWidth + 'px' }"
     >
-      <DocumentOutline v-if="doc" :editor="editorInstance" />
+      <DocumentOutline v-if="doc && !isDrawing" :editor="editorInstance" />
       <DocumentInsightsPanel
-        v-if="doc"
+        v-if="doc && !isDrawing"
         :doc-id="doc.id"
         :live-markdown="liveMarkdown"
         @open-doc="onOpenRelated"
@@ -432,7 +448,7 @@ onBeforeUnmount(endRailResize)
     />
 
     <DocInsightsSheet
-      v-if="doc"
+      v-if="doc && !isDrawing"
       :is-open="insightsSheetOpen"
       :doc-id="doc.id"
       :live-markdown="liveMarkdown"

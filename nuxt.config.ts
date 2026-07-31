@@ -29,6 +29,15 @@ export default defineNuxtConfig({
       appName: 'NoteForge',
     },
   },
+  vite: {
+    optimizeDeps: {
+      // The whiteboard NodeView lazy-imports Excalidraw (a React app) the
+      // first time a board mounts. Without pre-bundling these, Vite discovers
+      // them mid-session and force-reloads the dev server page — which throws
+      // away the editor state the user was in the middle of.
+      include: ['react', 'react-dom', 'react-dom/client', '@excalidraw/excalidraw'],
+    },
+  },
   nitro: {
     // OAuth discovery documents. These live under `/.well-known/…`, and a
     // dot-prefixed directory inside `server/routes/` is not something we want

@@ -17,6 +17,7 @@ import { and, asc, desc, eq, gte, inArray, lte, sql } from 'drizzle-orm'
 import { defineEventHandler, getValidatedQuery } from 'h3'
 import { getRawDb, useDb } from '~/server/database/client'
 import { docAnalyses, documents } from '~/server/database/schema'
+import { stripEmbeddedDataUrls } from '~/utils/excalidraw-scene'
 import { assertWorkspaceAccess, parseIdParam } from '~/server/utils/access'
 import { activeDocsWhere } from '~/server/utils/active'
 import { decryptAnalysis, decryptDocument } from '~/server/utils/encrypted-entities'
@@ -272,7 +273,10 @@ export default defineEventHandler(async (event) => {
     }
     else {
       // No FTS hit → pull the first 220 chars of (decrypted) markdown as snippet.
-      const md = (plain.markdown ?? '').replace(/[#*_`~>]/g, '').replace(/\s+/g, ' ').trim()
+      // A drawing's markdown ends in a PNG data URL — strip embedded payloads
+      // first or the snippet is a wall of base64.
+      const md = stripEmbeddedDataUrls(plain.markdown ?? '')
+        .replace(/[#*_`~>]/g, '').replace(/\s+/g, ' ').trim()
       snippet = compactSnippet(md, 220)
       if (hasQuery && snippet.length > 0) snippet = highlightTerms(snippet, queryText)
     }

@@ -414,6 +414,16 @@ async function onCreateRootDocument() {
   await router.push(`/w/${current.value.id}/d/${doc.id}`)
 }
 
+async function onCreateRootExcalidraw() {
+  if (!current.value) return
+  const doc = await treeStore.createDocument({
+    folderId: null,
+    type: 'excalidraw',
+    title: t('sidebar.newExcalidraw'),
+  })
+  await router.push(`/w/${current.value.id}/d/${doc.id}`)
+}
+
 async function onCreateRootFolder() {
   const name = await dialog.prompt({
     title: t('folder.new.title'),
@@ -827,6 +837,7 @@ async function onRootDocDrop(e: DragEvent) {
             <NewItemMenu
               v-if="current"
               @new-document="onCreateRootDocument"
+              @new-excalidraw="onCreateRootExcalidraw"
               @new-folder="onCreateRootFolder"
               @import-files="onImportFiles"
             />

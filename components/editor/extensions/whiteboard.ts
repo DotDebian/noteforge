@@ -1,18 +1,26 @@
 /**
- * Whiteboard / drawing block.
+ * Legacy in-note whiteboard block — PARSE AND RENDER ONLY.
  *
- * Stores a Konva scene graph (serialized via `Konva.Node.toJSON()`) inside
- * the node attribute `data-scene` (base64-encoded JSON, so the markdown
- * source stays readable and round-trip-safe). The NodeView mounts a
- * Konva Stage in `<WhiteboardNodeView>` and writes back to the attribute
- * whenever the user finishes a stroke / shape / drag.
+ * Drawings are standalone documents now (`documents.type = 'excalidraw'`, see
+ * `ExcalidrawEditor.vue`). There is deliberately **no insert command and no
+ * slash-command entry**: a drawing buried inside a note could not be reached by
+ * MCP, bloated the note it lived in, and had no identity of its own.
  *
- * Round-trip:
+ * What remains is the read path. Notes authored before the change still carry
+ * `<div class="whiteboard" data-scene="…" data-preview="…">`, whose `data-scene`
+ * is a Konva layer graph — Konva is no longer a dependency, so the node view
+ * renders the stored `data-preview` PNG read-only and offers to convert the
+ * block into a plain markdown image.
+ *
+ * Round-trip (unchanged, so old notes survive an edit + save untouched):
  *   - markdown / HTML  `<div class="whiteboard" data-scene="…" data-w="800" data-h="480"></div>`
  *       → marked passes raw HTML blocks through verbatim.
  *       → parseHTML grabs `data-scene` / `data-w` / `data-h` into attrs.
  *   - editor → renderHTML emits the same div.
  *           → turndown rule (in `useEditorMarkdown.ts`) re-emits the HTML.
+ *
+ * `data-preview` (a PNG data URL) is also what the PDF / DOCX exporters embed
+ * for these blocks — see `server/utils/export-pdf.ts`.
  */
 import { Node, mergeAttributes, VueNodeViewRenderer } from '@tiptap/vue-3'
 import WhiteboardNodeView from '../WhiteboardNodeView.vue'
@@ -22,15 +30,6 @@ export interface WhiteboardAttributes {
   width: number
   height: number
   preview: string
-}
-
-declare module '@tiptap/vue-3' {
-  interface Commands<ReturnType> {
-    whiteboard: {
-      /** Insert an empty whiteboard node at the current selection. */
-      insertWhiteboard: () => ReturnType
-    }
-  }
 }
 
 const DEFAULT_WIDTH = 800
@@ -53,8 +52,8 @@ export const Whiteboard = Node.create({
   // ProseMirror starts a node-drag the instant the user presses on the
   // whiteboard area — which is exactly the gesture they use to draw,
   // so every stroke would turn into a browser image-drag. Disabling the
-  // PM drag here lets pointerdown reach the Konva stage cleanly. Users
-  // can still reorder the node via cut/paste.
+  // PM drag here lets pointerdown reach the Excalidraw canvas cleanly.
+  // Users can still reorder the node via cut/paste.
   draggable: false,
   defining: true,
 
@@ -109,24 +108,5 @@ export const Whiteboard = Node.create({
 
   addNodeView() {
     return VueNodeViewRenderer(WhiteboardNodeView)
-  },
-
-  addCommands() {
-    return {
-      insertWhiteboard: () => ({ chain }) => {
-        return chain()
-          .focus()
-          .insertContent({
-            type: this.name,
-            attrs: {
-              scene: '',
-              width: DEFAULT_WIDTH,
-              height: DEFAULT_HEIGHT,
-              preview: '',
-            },
-          })
-          .run()
-      },
-    }
   },
 })

@@ -690,7 +690,7 @@ function getTurndown(): TurndownService {
       const el = node as HTMLElement
       const scene = el.getAttribute('data-scene') ?? ''
       const w = el.getAttribute('data-w') ?? '800'
-      const h = el.getAttribute('data-h') ?? '480'
+      const h = el.getAttribute('data-h') ?? '560'
       const preview = el.getAttribute('data-preview') ?? ''
       const attrs = [
         `class="whiteboard"`,

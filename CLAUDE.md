@@ -94,6 +94,40 @@ Autosave is `useDocumentSaver(docId, 500ms)` — debounced PATCH, merges title +
 
 **Editor scroll layout**: the scroll container is `<EditorContent class="editor-scroll …">` itself (the centered text column), NOT the outer wrapper — so the scrollbar sits at the edge of the writing area. The outer flex wrapper is `overflow-hidden`. `.editor-scroll` is defined globally in `main.css`. Don't refactor the wrapper to scroll itself or the scrollbar jumps to the rail edge.
 
+### Document types — notes vs. drawings
+
+`documents.type` (migration `0026_document_type`, `NOT NULL DEFAULT 'markdown'`) selects the flavour. `DOCUMENT_TYPES` / `DocumentType` live in [server/database/schema.ts](server/database/schema.ts).
+
+| type | `content_json` | `markdown` |
+|------|----------------|------------|
+| `markdown` | Tiptap mirror of the body | source of truth |
+| `excalidraw` | **source of truth** — the `.excalidraw` scene verbatim | **derived**, rewritten on every save |
+
+A drawing's `markdown` is `buildDrawingMarkdown()`: the scene's text elements in reading order, then a PNG data URL. That single decision is why search, FTS, RAG, `![[transclusion]]`, public shares and all four export formats work on drawings **with no special-casing** — they all read `markdown` and never know the difference.
+
+[utils/excalidraw-scene.ts](utils/excalidraw-scene.ts) is the shared, dependency-free module (client + Nitro + vitest, same split rationale as `oauth-policy.ts`): scene parse/serialize, `extractSceneText`, `buildDrawingMarkdown`, `stripEmbeddedDataUrls`. Tests in `tests/excalidraw-scene.test.ts`.
+
+⚠️ **`stripEmbeddedDataUrls` is mandatory on every path that turns document markdown into tokens or an index.** A 720 px preview is ~50-150 KB of base64. Current call sites: `analyzeUserDocument` (Mistral prompt), `embedDocument` (chunking → embeddings **and** the FTS5 mirror), `toMcpDocument` (tool responses), the search-snippet fallback in `workspaces/[id]/search.get.ts`. Add a fifth path that reads `documents.markdown` for AI or indexing and it needs the same treatment.
+
+⚠️ **Writes to a drawing's markdown are refused, in the service layer**: `assertMarkdownDocument()` guards `appendToUserDocument` / `patchUserDocument`, and `updateUserDocument` rejects a `markdown` without a matching `contentJson`. Otherwise an MCP append would be silently discarded on the next canvas edit, or land inside a base64 blob. The legitimate writers send both columns: `ExcalidrawEditor` and `updateUserDrawing`.
+
+⚠️ **A headless writer cannot render the preview.** `updateUserDrawing` (MCP `write_drawing`) drops the image rather than keep a stale one; `ExcalidrawEditor.maybeHealPreview` notices a scene with elements but no `](data:image/` in its markdown and re-persists once. That is the only path that regenerates it.
+
+MCP surface: `read_drawing` / `write_drawing` (full scene, `.excalidraw` JSON as a string), `create_document` takes `type`.
+
+### Excalidraw — a React island
+
+[components/editor/ExcalidrawEditor.vue](components/editor/ExcalidrawEditor.vue) mounts the **Excalidraw React app** inside Vue. This is the only React in the codebase. `pages/w/[workspaceId]/d/[docId].vue` branches on `doc.type` and also hides the outline + insights panels for drawings (no Tiptap instance to read headings from, and auto-analysis would keep firing on a canvas).
+
+- **Lazy by construction**: `react`, `react-dom/client`, `@excalidraw/excalidraw` and its CSS are `import()`-ed inside `mountExcalidraw()`. They land in their own client chunks (~1.1 MB JS + 143 KB CSS), so a workspace with no drawing never downloads them, and nothing reaches the SSR bundle. `nuxt.config.ts → vite.optimizeDeps.include` pre-bundles them so the dev server doesn't force-reload on first mount.
+- **Fonts are self-hosted**: `scripts/copy-excalidraw-assets.mjs` copies `dist/prod/fonts` into `public/excalidraw/` (gitignored, ~14 MB) and the editor pins `window.EXCALIDRAW_ASSET_PATH = '/excalidraw/'` **before** the dynamic import. Without that global, Excalidraw fetches fonts from `esm.sh`. The copy runs from the `dev` and `build` npm scripts — keep it there or a fresh Docker image ships a canvas that phones home.
+- **Persist gating**: Excalidraw's `onChange` fires on pan/zoom/selection too, so writes are gated on `getSceneVersion(elements)` + `viewBackgroundColor` and debounced 700 ms. `lastSceneVersion` is seeded from the loaded scene so merely opening a drawing never marks it dirty.
+- `initialData` is read once by Excalidraw, so it is captured at mount and left out of the theme/locale re-render — passing a fresh one would reset the user's work.
+
+### Legacy in-note whiteboards (read-only)
+
+Before drawings became documents, notes could embed a Konva whiteboard: `<div class="whiteboard" data-scene="…" data-preview="…">`. That block is now **parse-and-render only** — no insert command, no `/draw` slash entry. Konva is gone from `package.json`, so `data-scene` (a Konva layer graph) is unrecoverable; [components/editor/WhiteboardNodeView.vue](components/editor/WhiteboardNodeView.vue) paints the stored `data-preview` PNG and offers to convert the block into a plain markdown image. The turndown rule and `parseHTML` are unchanged so editing and saving an old note doesn't mangle it. `export-pdf.ts` / `export-docx.ts` still embed `data-preview` for these blocks.
+
 ### AI flow
 
 - `mistralChat` / `mistralChatStream` / `mistralEmbed` in `server/utils/mistral.ts` (raw fetch, no SDK). `mistralChatStream` is an async generator over SSE deltas.
@@ -142,9 +176,10 @@ Token CRUD endpoints (session-authenticated, called by the front):
 - `find_document(query, workspaceId?, workspaceName?, limit?, includeContent?)` — fuzzy accent-insensitive title resolution ([server/utils/title-match.ts](server/utils/title-match.ts)); `includeContent` embeds the best match's full markdown + analysis; a `workspaceName` miss returns the available names so the client self-corrects without a list call
 - `list_workspaces` / `get_workspace(workspaceId)`
 - `list_documents(workspaceId, folderId?)` / `read_document(documentId)` — read tools pass `{ includeTrashed: false }` so trashed docs raise 404 over MCP, even though the REST `GET /api/documents/:id` returns them (trash UI needs them). `read_document` also returns the wiki-link neighbourhood (`links.outgoing` / `links.backlinks`)
-- `create_document` / `update_document` / `delete_document` (soft)
+- `create_document` (takes `type` — `'markdown'` or `'excalidraw'`) / `update_document` / `delete_document` (soft)
 - `append_to_document(documentId, markdown)` — append without read-merge-rewrite; reuses `updateUserDocument` so snapshots + doc-link reconcile still run
 - `patch_document(documentId, patch, dryRun?)` — edit the MIDDLE of a doc with a git-style unified diff instead of re-emitting the whole body (the whole point: token cost on long notes). Engine is [server/utils/patch.ts](server/utils/patch.ts) — pure module, no `h3`/db, so `tests/patch.test.ts` can import it (same split rationale as `oauth-policy.ts`). **Hunks are located by content, not by line number**: exact match → whitespace-insensitive → fuzz (trim up to 3 shared context lines per side), nearest occurrence to the declared `@@` position wins, and a cursor forbids a later hunk from matching above an earlier one. All-or-nothing: a miss throws 422 whose `message` carries the expected block + the real document window (and detects "already applied"), so the caller retries without re-reading. Response returns document **metadata only** (`toMcpDocumentMeta` also strips `markdown`) — echoing the patched body back would undo the saving. Parser leniencies (fenced patch, `diff --git` preamble, unprefixed context lines, trailing-newline trim) are reported in `warnings`
+- `read_drawing(documentId)` / `write_drawing(documentId, scene)` — the full `.excalidraw` scene of a `type: 'excalidraw'` document, as a JSON string. `write_drawing` REPLACES the scene (no partial update) and drops the preview image, which only a browser can regenerate. Both refuse a markdown document. See "Document types" above
 - `get_daily_note(workspaceId, date?, appendMarkdown?)` — find-or-create the `YYYY-MM-DD` journal note (date defaults to server-today), optional same-call append
 - `create_folder` / `update_folder` / `delete_folder` (soft — cascades the whole subtree with a shared `deletedAt` timestamp)
 - `search_notes(workspaceId?, query)` — hybrid (vec + FTS5 BM25 + RRF) + Mistral reranker, top-6 with max 2/doc (same shared primitives as chat RAG, but reranked end-to-end since MCP returns results directly). `workspaceId` omitted = cross-workspace: one embed + one rerank total via `searchChunkGroups` (one group per workspace key)

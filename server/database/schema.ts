@@ -134,6 +134,14 @@ export const folders = sqliteTable(
   }),
 )
 
+/**
+ * Document flavours. `'markdown'` is the default and covers every row written
+ * before the standalone-drawing feature landed — the column's SQL default keeps
+ * old rows valid without a backfill.
+ */
+export const DOCUMENT_TYPES = ['markdown', 'excalidraw'] as const
+export type DocumentType = (typeof DOCUMENT_TYPES)[number]
+
 export const documents = sqliteTable(
   'documents',
   {
@@ -143,6 +151,18 @@ export const documents = sqliteTable(
       .references(() => workspaces.id, { onDelete: 'cascade' }),
     folderId: integer('folder_id'),
     title: text('title').notNull().default('Untitled'),
+    // What `markdown` / `contentJson` actually hold.
+    //  - 'markdown'   — the historical shape: `markdown` is the source of
+    //                   truth, `contentJson` its Tiptap mirror.
+    //  - 'excalidraw' — `contentJson` is the source of truth (an Excalidraw
+    //                   scene, see utils/excalidraw-scene.ts) and `markdown`
+    //                   is DERIVED from it on every save: the drawing's text
+    //                   elements followed by a PNG data-URL image. That is
+    //                   what keeps search, RAG, exports, transclusion and
+    //                   public shares working without a special case.
+    // Anything that WRITES markdown (MCP patch/append, version restore) must
+    // refuse or regenerate for 'excalidraw' rows — see server/utils/notes.ts.
+    type: text('type').notNull().default('markdown').$type<DocumentType>(),
     markdown: text('markdown').notNull().default(''),
     contentJson: text('content_json').notNull().default('{}'),
     position: integer('position').notNull().default(0),

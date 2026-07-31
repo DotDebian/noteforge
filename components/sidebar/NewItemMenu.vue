@@ -6,6 +6,7 @@ const { t } = useLocale()
 
 const emit = defineEmits<{
   (e: 'new-document'): void
+  (e: 'new-excalidraw'): void
   (e: 'new-folder'): void
   (e: 'import-files', files: File[]): void
 }>()
@@ -28,6 +29,7 @@ if (typeof window !== 'undefined') {
 }
 
 function onDoc() { close(); emit('new-document') }
+function onExcalidraw() { close(); emit('new-excalidraw') }
 function onFolder() { close(); emit('new-folder') }
 
 function onImport() {
@@ -59,6 +61,21 @@ function onFilesPicked(e: Event) {
             <path d="M3.5 2h6L13 5.5V14H3.5z M9 2v4h4" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round" />
           </svg>
           <span>{{ t('sidebar.newDocument') }}</span>
+        </button>
+        <button type="button" class="item" role="menuitem" @click="onExcalidraw">
+          <!-- Pencil over a frame — reads as "drawing surface" at 12px, where a
+               literal Excalidraw mark would be an unrecognisable smudge. -->
+          <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+            <path
+              d="M13.5 8.5V13H3V2.5h4.5 M9.5 6.5l3.2-3.2a1 1 0 0 0-1.4-1.4L8 5.2V7h1.8z"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.1"
+              stroke-linejoin="round"
+              stroke-linecap="round"
+            />
+          </svg>
+          <span>{{ t('sidebar.newExcalidraw') }}</span>
         </button>
         <button type="button" class="item" role="menuitem" @click="onFolder">
           <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">

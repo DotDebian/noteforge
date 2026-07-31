@@ -112,6 +112,17 @@ async function onNewDoc() {
   await navigateTo(`/w/${props.workspaceId}/d/${doc.id}`)
 }
 
+async function onNewExcalidraw() {
+  closeMenu()
+  const doc = await treeStore.createDocument({
+    folderId: props.folder.id,
+    type: 'excalidraw',
+    title: t('sidebar.newExcalidraw'),
+  })
+  treeStore.expand(props.folder.id)
+  await navigateTo(`/w/${props.workspaceId}/d/${doc.id}`)
+}
+
 async function onNewSubfolder() {
   closeMenu()
   const name = await dialog.prompt({
@@ -597,6 +608,7 @@ async function onDocRowDrop(e: DragEvent, hoverDocFolderId: number | null) {
             :style="menuStyle"
             role="menu"
           >
+            <button type="button" class="menu-item" role="menuitem" @click="onNewExcalidraw">{{ t('sidebar.newExcalidraw') }}</button>
             <button type="button" class="menu-item" role="menuitem" @click="onNewSubfolder">{{ t('sidebar.newSubfolder') }}</button>
             <button type="button" class="menu-item" role="menuitem" @click="onRename">{{ t('sidebar.rename') }}</button>
             <div class="menu-sep" />
@@ -645,7 +657,12 @@ async function onDocRowDrop(e: DragEvent, hoverDocFolderId: number | null) {
           @click.stop
           @change="bulkSelect.toggleDoc(doc.id)"
         >
-        <span v-else class="doc-leaf" aria-hidden="true" />
+        <span
+          v-else
+          class="doc-leaf"
+          :class="{ 'doc-leaf--drawing': doc.type === 'excalidraw' }"
+          aria-hidden="true"
+        />
         <span class="doc-title">{{ doc.title || t('doc.untitled') }}</span>
         <button
           v-if="!bulkSelect.isActive"
@@ -804,6 +821,12 @@ html.dark .doc-row--active {
 }
 .doc-leaf {
   @apply inline-block h-[3px] w-[3px] rounded-full bg-ink-300 dark:bg-ink-600 shrink-0;
+}
+/* Drawings get a different silhouette at the SAME 3px footprint — a wider
+   glyph would shift every drawing's title and break the tree's left edge. */
+.doc-leaf--drawing {
+  @apply rounded-none bg-accent-400 dark:bg-accent-500;
+  transform: rotate(45deg);
 }
 .doc-title { @apply truncate flex-1 min-w-0; }
 .doc-action {

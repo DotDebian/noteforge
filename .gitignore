@@ -5,11 +5,18 @@ node_modules
 dist
 .cache
 
+# Excalidraw fonts, copied out of node_modules by scripts/copy-excalidraw-assets.mjs
+# on `pnpm dev` / `pnpm build`. Generated, ~14 MB — not source.
+public/excalidraw/
+
 # env
 .env
 .env.local
 
 # database / data
+# `data/*.db` alone did not cover data/backups/, which holds full copies of the
+# production database — real user data, tens of MB. Ignore the directory.
+data/backups/
 data/*.db
 data/*.db-journal
 data/*.db-wal

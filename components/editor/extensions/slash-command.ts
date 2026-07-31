@@ -16,7 +16,6 @@ import './callout'
 import './footnote'
 import './collapsible'
 import './transclusion'
-import './whiteboard'
 
 /**
  * We need the same `Editor` and `Range` types that `@tiptap/suggestion`
@@ -74,8 +73,6 @@ export function buildSlashCommandItems(t: SlashTranslator): SlashCommandItem[] {
   const tableDesc = pickLocaleString('Tableau modifiable avec en-têtes', 'Editable table with headers')
   const embedTitle = pickLocaleString('Inclure un document', 'Embed document')
   const embedDesc = pickLocaleString('Transclusion d\'un autre document', 'Transclude another document')
-  const drawTitle = pickLocaleString('Tableau blanc', 'Whiteboard')
-  const drawDesc = pickLocaleString('Croquis et schémas libres', 'Free-form sketches and diagrams')
   return [
     {
       title: t('slash.h1.title'),
@@ -257,20 +254,6 @@ export function buildSlashCommandItems(t: SlashTranslator): SlashCommandItem[] {
           .focus()
           .deleteRange(range)
           .insertContent('![[')
-          .run()
-      },
-    },
-    {
-      title: drawTitle,
-      description: drawDesc,
-      keywords: ['draw', 'whiteboard', 'sketch', 'paint', 'tableau', 'dessin', 'croquis', 'schéma'],
-      icon: '✎',
-      command: ({ editor, range }) => {
-        editor
-          .chain()
-          .focus()
-          .deleteRange(range)
-          .insertWhiteboard()
           .run()
       },
     },
