@@ -295,13 +295,83 @@ onBeforeUnmount(() => {
 watch([isDark, locale], () => {
   if (status.value === 'ready') renderRoot()
 })
+
+/* -------------------------------------------------------------------------- */
+/*  Fullscreen                                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Two mechanisms, deliberately:
+ *
+ *  - `isFullscreen` drives a `position: fixed; inset: 0` class. That alone
+ *    already hides the app chrome (sidebar, title row, topbar) and is what
+ *    actually makes the canvas usable.
+ *  - on top of it we ASK for native fullscreen, which additionally drops the
+ *    browser's own chrome. It can be refused (permissions policy, an iframe,
+ *    Safari quirks) — hence the try/catch, and hence the CSS being the source
+ *    of truth rather than `document.fullscreenElement`.
+ *
+ * Excalidraw renders its menus and dialogs inside its own container, so they
+ * follow the element into native fullscreen instead of being stranded on a
+ * `document.body` portal.
+ */
+const shellRef = ref<HTMLDivElement | null>(null)
+const isFullscreen = ref(false)
+
+async function toggleFullscreen(): Promise<void> {
+  if (isFullscreen.value) {
+    isFullscreen.value = false
+    if (typeof document !== 'undefined' && document.fullscreenElement) {
+      try { await document.exitFullscreen() }
+      catch { /* already gone */ }
+    }
+    return
+  }
+  isFullscreen.value = true
+  const el = shellRef.value
+  if (el?.requestFullscreen) {
+    try { await el.requestFullscreen() }
+    catch {
+      // Native fullscreen refused — the CSS layer still gives the whole
+      // viewport, so this is a degradation, not a failure.
+    }
+  }
+}
+
+/**
+ * Escape (or F11) exits native fullscreen without going through our button.
+ * Mirror that back into the CSS state, otherwise the canvas would stay pinned
+ * over the app with no visible way out.
+ */
+function onNativeFullscreenChange(): void {
+  if (!document.fullscreenElement && isFullscreen.value) isFullscreen.value = false
+}
+
+onMounted(() => {
+  document.addEventListener('fullscreenchange', onNativeFullscreenChange)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('fullscreenchange', onNativeFullscreenChange)
+  // Leaving the page while fullscreen would strand the browser in it.
+  if (typeof document !== 'undefined' && document.fullscreenElement) {
+    void document.exitFullscreen().catch(() => {})
+  }
+})
 </script>
 
 <template>
-  <div class="flex flex-1 min-h-0 flex-col bg-ink-50 dark:bg-ink-950">
+  <div
+    ref="shellRef"
+    class="excalidraw-shell"
+    :class="{ 'is-fullscreen': isFullscreen }"
+  >
     <!-- Title row — same rhythm as DocumentEditor so switching between a note
-         and a drawing doesn't shift the page. -->
-    <div class="mx-auto w-full max-w-3xl xl:max-w-4xl 2xl:max-w-6xl pt-4 md:px-6">
+         and a drawing doesn't shift the page. Hidden in fullscreen: the point
+         of fullscreen is that only the canvas is left. -->
+    <div
+      v-show="!isFullscreen"
+      class="mx-auto w-full max-w-3xl xl:max-w-4xl 2xl:max-w-6xl pt-4 md:px-6"
+    >
       <div class="mb-2 flex items-center justify-between gap-3">
         <span class="label-mono" aria-live="polite">{{ statusLabel }}</span>
         <span class="label-mono">{{ t('doc.excalidraw.badge') }}</span>
@@ -326,11 +396,59 @@ watch([isDark, locale], () => {
       <p v-else-if="status === 'failed'" class="excalidraw-overlay is-error">
         {{ t('doc.excalidraw.failed') }}
       </p>
+      <!-- Bottom-right: Excalidraw keeps its own UI top-left (toolbar), top-right
+           (library) and bottom-left (zoom / undo), so this corner is the one
+           spot that never collides. -->
+      <button
+        type="button"
+        class="fs-btn"
+        :title="isFullscreen ? t('doc.excalidraw.collapse') : t('doc.excalidraw.expand')"
+        :aria-label="isFullscreen ? t('doc.excalidraw.collapse') : t('doc.excalidraw.expand')"
+        :aria-pressed="isFullscreen"
+        @click="toggleFullscreen"
+      >
+        <svg v-if="!isFullscreen" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path
+            d="M6 2H2v4 M10 2h4v4 M6 14H2v-4 M10 14h4v-4"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <svg v-else viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path
+            d="M2 6h4V2 M14 6h-4V2 M2 10h4v4 M14 10h-4v4"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
     </div>
   </div>
 </template>
 
 <style scoped>
+.excalidraw-shell {
+  @apply flex flex-1 min-h-0 flex-col bg-ink-50;
+}
+html.dark .excalidraw-shell {
+  background: theme('colors.ink.950');
+}
+/* CSS fullscreen. Kept even when native fullscreen is granted — the browser
+   sizes the element to the screen and these rules stay harmless — so a refused
+   `requestFullscreen()` still lands on a full-viewport canvas. */
+.excalidraw-shell.is-fullscreen {
+  @apply fixed inset-0;
+  /* Above every piece of app chrome — the mobile topbar and sidebar drawer
+     top out at 50, dialogs at 60. */
+  z-index: 70;
+}
+
 .title-input {
   @apply w-full border-0 bg-transparent font-serif text-4xl font-semibold leading-tight tracking-tight text-ink-900 placeholder:text-ink-300 focus:outline-none focus:ring-0;
 }
@@ -357,5 +475,23 @@ html.dark .excalidraw-area {
 }
 .excalidraw-overlay.is-error {
   @apply text-red-600;
+}
+
+.fs-btn {
+  /* Above Excalidraw's own UI layer, which tops out below 10. */
+  @apply absolute bottom-4 right-4 z-10 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-ink-200 bg-white/90 text-ink-600 shadow-sm backdrop-blur transition-colors hover:bg-white hover:text-ink-900;
+}
+html.dark .fs-btn {
+  background: theme('colors.ink.900' / 90%);
+  border-color: theme('colors.ink.700');
+  color: theme('colors.ink.300');
+}
+html.dark .fs-btn:hover {
+  background: theme('colors.ink.800');
+  color: theme('colors.ink.50');
+}
+/* In fullscreen the border-top of .excalidraw-area is meaningless. */
+.is-fullscreen .excalidraw-area {
+  @apply mt-0 border-t-0;
 }
 </style>

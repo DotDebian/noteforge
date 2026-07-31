@@ -350,7 +350,7 @@ onBeforeUnmount(endRailResize)
                as a bottom sheet. The desktop rail (.doc-rail) is hidden
                below lg, so this button surfaces the same data. -->
           <button
-            v-if="doc"
+            v-if="doc && !isDrawing"
             type="button"
             class="meta-action meta-action--insights lg:hidden"
             :title="t('doc.meta.insightsTitle')"
@@ -407,29 +407,34 @@ onBeforeUnmount(endRailResize)
 
     <!-- Drag handle for the rail. A full-height flex sibling (not inside the
          scrolling rail) so it stays pinned on the rail's left edge. lg+ only,
-         matching the rail's own visibility. -->
-    <div
-      class="rail-resize-handle hidden lg:flex"
-      :class="{ 'rail-resize-handle--active': railResizing }"
-      role="separator"
-      aria-orientation="vertical"
-      :aria-label="t('doc.rail.resize')"
-      :title="t('doc.rail.resize')"
-      @pointerdown="startRailResize"
-    />
-    <aside
-      class="doc-rail"
-      :style="{ width: railWidth + 'px' }"
-    >
-      <DocumentOutline v-if="doc && !isDrawing" :editor="editorInstance" />
-      <DocumentInsightsPanel
-        v-if="doc && !isDrawing"
-        :doc-id="doc.id"
-        :live-markdown="liveMarkdown"
-        @open-doc="onOpenRelated"
+         matching the rail's own visibility.
+         Drawings drop the rail entirely — outline, insights and backlinks all
+         read a markdown body that a canvas doesn't have — so the canvas gets
+         the full width. -->
+    <template v-if="!isDrawing">
+      <div
+        class="rail-resize-handle hidden lg:flex"
+        :class="{ 'rail-resize-handle--active': railResizing }"
+        role="separator"
+        aria-orientation="vertical"
+        :aria-label="t('doc.rail.resize')"
+        :title="t('doc.rail.resize')"
+        @pointerdown="startRailResize"
       />
-      <DocumentBacklinks v-if="doc" :doc-id="doc.id" />
-    </aside>
+      <aside
+        class="doc-rail"
+        :style="{ width: railWidth + 'px' }"
+      >
+        <DocumentOutline v-if="doc" :editor="editorInstance" />
+        <DocumentInsightsPanel
+          v-if="doc"
+          :doc-id="doc.id"
+          :live-markdown="liveMarkdown"
+          @open-doc="onOpenRelated"
+        />
+        <DocumentBacklinks v-if="doc" :doc-id="doc.id" />
+      </aside>
+    </template>
 
     <ShareDialog
       v-if="doc"

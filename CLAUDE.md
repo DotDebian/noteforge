@@ -117,12 +117,13 @@ MCP surface: `read_drawing` / `write_drawing` (full scene, `.excalidraw` JSON as
 
 ### Excalidraw — a React island
 
-[components/editor/ExcalidrawEditor.vue](components/editor/ExcalidrawEditor.vue) mounts the **Excalidraw React app** inside Vue. This is the only React in the codebase. `pages/w/[workspaceId]/d/[docId].vue` branches on `doc.type` and also hides the outline + insights panels for drawings (no Tiptap instance to read headings from, and auto-analysis would keep firing on a canvas).
+[components/editor/ExcalidrawEditor.vue](components/editor/ExcalidrawEditor.vue) mounts the **Excalidraw React app** inside Vue. This is the only React in the codebase. `pages/w/[workspaceId]/d/[docId].vue` branches on `doc.type` and drops the **whole right rail** for drawings — outline, insights and backlinks all read a markdown body a canvas doesn't have — along with its resize handle, the mobile insights button in the doc header, and (in `layouts/default.vue`, via `isDocRoute`) the topbar one. Add a rail panel and it inherits that gate.
 
 - **Lazy by construction**: `react`, `react-dom/client`, `@excalidraw/excalidraw` and its CSS are `import()`-ed inside `mountExcalidraw()`. They land in their own client chunks (~1.1 MB JS + 143 KB CSS), so a workspace with no drawing never downloads them, and nothing reaches the SSR bundle. `nuxt.config.ts → vite.optimizeDeps.include` pre-bundles them so the dev server doesn't force-reload on first mount.
 - **Fonts are self-hosted**: `scripts/copy-excalidraw-assets.mjs` copies `dist/prod/fonts` into `public/excalidraw/` (gitignored, ~14 MB) and the editor pins `window.EXCALIDRAW_ASSET_PATH = '/excalidraw/'` **before** the dynamic import. Without that global, Excalidraw fetches fonts from `esm.sh`. The copy runs from the `dev` and `build` npm scripts — keep it there or a fresh Docker image ships a canvas that phones home.
 - **Persist gating**: Excalidraw's `onChange` fires on pan/zoom/selection too, so writes are gated on `getSceneVersion(elements)` + `viewBackgroundColor` and debounced 700 ms. `lastSceneVersion` is seeded from the loaded scene so merely opening a drawing never marks it dirty.
 - `initialData` is read once by Excalidraw, so it is captured at mount and left out of the theme/locale re-render — passing a fresh one would reset the user's work.
+- **Fullscreen** is two layers: an `is-fullscreen` class (`position: fixed; inset: 0; z-index: 70` — above the mobile topbar/drawer at 50 and dialogs at 60) *plus* a best-effort `requestFullscreen()` on the same element to also drop the browser chrome. The CSS is the source of truth, not `document.fullscreenElement`, so a refused native request still yields a full-viewport canvas; a `fullscreenchange` listener mirrors an Esc/F11 exit back into the class, and unmount leaves native fullscreen so navigating away can't strand the browser in it.
 
 ### Legacy in-note whiteboards (read-only)
 

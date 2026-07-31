@@ -34,7 +34,16 @@ const { t } = useLocale()
 // Show the doc-rail (Insights) topbar button only on a document route. The
 // sheet itself is rendered by the doc page, gated on `doc` being loaded, so
 // the button just flips the shared ref — the doc page handles the rest.
-const isDocRoute = computed(() => route.params.docId != null)
+//
+// Drawings have no rail at all (no outline, no AI analysis), so the button
+// would open an empty sheet. The type comes from the tree store rather than a
+// fetch: this is chrome, and a missing row just means "behave like a note".
+const isDocRoute = computed(() => {
+  const docIdParam = route.params.docId
+  if (docIdParam == null) return false
+  const found = treeStore.documents.find(d => d.id === Number(docIdParam))
+  return found?.type !== 'excalidraw'
+})
 
 /**
  * Impersonation banner: when an admin uses `POST /api/admin/users/:id/impersonate`
