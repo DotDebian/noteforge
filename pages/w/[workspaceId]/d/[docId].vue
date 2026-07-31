@@ -167,6 +167,26 @@ function onExport(format: 'html' | 'pdf' | 'docx' | 'md') {
   a.remove()
 }
 
+/**
+ * Rename from the header. Drawings have no title input — the canvas takes the
+ * whole area — so this is their only rename path inside the document (the
+ * sidebar's own rename still works). Goes through the tree store so the
+ * sidebar, the favourites list and the fetched payload all follow.
+ */
+async function onRename() {
+  if (!doc.value) return
+  const next = await dialog.prompt({
+    title: t('doc.meta.renameTitle'),
+    placeholder: t('doc.editor.titlePlaceholder'),
+    defaultValue: liveTitle.value,
+    confirmLabel: t('doc.meta.rename'),
+  })
+  const trimmed = next?.trim()
+  if (!trimmed || trimmed === liveTitle.value) return
+  await treeStore.renameDocument(doc.value.id, trimmed)
+  onTitleChange(trimmed)
+}
+
 function onAskThisDoc() {
   if (!doc.value) return
   chat.openWithScope({
@@ -281,8 +301,20 @@ onBeforeUnmount(endRailResize)
         </div>
 
         <div class="meta">
+          <!-- A drawing has no title input (the canvas owns the whole area) and
+               nothing for the chat to retrieve beyond its labels, so the same
+               slot carries "rename" instead of "ask this doc". -->
           <button
-            v-if="doc"
+            v-if="doc && isDrawing"
+            type="button"
+            class="meta-action"
+            :title="t('doc.meta.renameTitle')"
+            @click="onRename"
+          >
+            {{ t('doc.meta.rename') }}
+          </button>
+          <button
+            v-else-if="doc"
             type="button"
             class="meta-action"
             :title="t('doc.meta.askTitle')"
@@ -379,11 +411,12 @@ onBeforeUnmount(endRailResize)
       </div>
 
       <ClientOnly v-else-if="doc">
+        <!-- No `@update:title`: a drawing has no title input, the header's
+             "Rename" owns it. -->
         <ExcalidrawEditor
           v-if="isDrawing"
           :key="`${doc.id}-${editorVersionKey}`"
           :doc="doc"
-          @update:title="onTitleChange"
           @update:markdown="onMarkdownChange"
         />
         <DocumentEditor

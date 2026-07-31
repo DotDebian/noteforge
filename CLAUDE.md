@@ -117,7 +117,12 @@ MCP surface: `read_drawing` / `write_drawing` (full scene, `.excalidraw` JSON as
 
 ### Excalidraw — a React island
 
-[components/editor/ExcalidrawEditor.vue](components/editor/ExcalidrawEditor.vue) mounts the **Excalidraw React app** inside Vue. This is the only React in the codebase. `pages/w/[workspaceId]/d/[docId].vue` branches on `doc.type` and drops the **whole right rail** for drawings — outline, insights and backlinks all read a markdown body a canvas doesn't have — along with its resize handle, the mobile insights button in the doc header, and (in `layouts/default.vue`, via `isDocRoute`) the topbar one. Add a rail panel and it inherits that gate.
+[components/editor/ExcalidrawEditor.vue](components/editor/ExcalidrawEditor.vue) mounts the **Excalidraw React app** inside Vue. This is the only React in the codebase.
+
+**A drawing page is canvas and nothing else.** `pages/w/[workspaceId]/d/[docId].vue` branches on `doc.type` and drops: the whole right rail (outline / insights / backlinks all read a markdown body a canvas doesn't have) with its resize handle, the mobile insights buttons, and the editor's own title row. `layouts/default.vue` derives `currentDocType` from the tree store and hides the chat FAB (`isDrawingRoute`) and the topbar insights button (`isDocRoute`). Two things move as a consequence, and they have no other home:
+
+- **Renaming** is the header's "Rename" button (`onRename` → `dialog.prompt` → `treeStore.renameDocument`), which replaces "Ask this doc" for drawings. The editor therefore never emits `update:title` and reads the title through a computed on the prop — a local ref would go stale after a rename and bake the old name into the derived markdown's alt text.
+- **Save state** is the pill pinned bottom-right next to the fullscreen button. It is the only feedback that the canvas is persisting.
 
 - **Lazy by construction**: `react`, `react-dom/client`, `@excalidraw/excalidraw` and its CSS are `import()`-ed inside `mountExcalidraw()`. They land in their own client chunks (~1.1 MB JS + 143 KB CSS), so a workspace with no drawing never downloads them, and nothing reaches the SSR bundle. `nuxt.config.ts → vite.optimizeDeps.include` pre-bundles them so the dev server doesn't force-reload on first mount.
 - **Fonts are self-hosted**: `scripts/copy-excalidraw-assets.mjs` copies `dist/prod/fonts` into `public/excalidraw/` (gitignored, ~14 MB) and the editor pins `window.EXCALIDRAW_ASSET_PATH = '/excalidraw/'` **before** the dynamic import. Without that global, Excalidraw fetches fonts from `esm.sh`. The copy runs from the `dev` and `build` npm scripts — keep it there or a fresh Docker image ships a canvas that phones home.

@@ -31,19 +31,29 @@ const insightsSheet = useDocInsightsSheet()
 const actionsSheet = useDocActionsSheet()
 const { t } = useLocale()
 
+/**
+ * Type of the document currently routed to, or `null` off a document route.
+ * Read from the tree store rather than fetched: this only drives chrome, and a
+ * row the store hasn't loaded yet simply behaves like a note.
+ */
+const currentDocType = computed(() => {
+  const docIdParam = route.params.docId
+  if (docIdParam == null) return null
+  const found = treeStore.documents.find(d => d.id === Number(docIdParam))
+  return found?.type ?? 'markdown'
+})
+
+/**
+ * A drawing gets none of the document chrome: no rail (nothing in it reads a
+ * canvas) and no chat entry point (retrieval has only the drawing's labels to
+ * work with, and the FAB sits exactly where Excalidraw puts its own UI).
+ */
+const isDrawingRoute = computed(() => currentDocType.value === 'excalidraw')
+
 // Show the doc-rail (Insights) topbar button only on a document route. The
 // sheet itself is rendered by the doc page, gated on `doc` being loaded, so
 // the button just flips the shared ref — the doc page handles the rest.
-//
-// Drawings have no rail at all (no outline, no AI analysis), so the button
-// would open an empty sheet. The type comes from the tree store rather than a
-// fetch: this is chrome, and a missing row just means "behave like a note".
-const isDocRoute = computed(() => {
-  const docIdParam = route.params.docId
-  if (docIdParam == null) return false
-  const found = treeStore.documents.find(d => d.id === Number(docIdParam))
-  return found?.type !== 'excalidraw'
-})
+const isDocRoute = computed(() => currentDocType.value !== null && !isDrawingRoute.value)
 
 /**
  * Impersonation banner: when an admin uses `POST /api/admin/users/:id/impersonate`
@@ -345,7 +355,7 @@ onBeforeUnmount(() => {
       </div>
     </Transition>
     <button
-      v-if="workspaces.current && !chat.open"
+      v-if="workspaces.current && !chat.open && !isDrawingRoute"
       type="button"
       class="chat-fab"
       :title="t('chat.openTitle')"

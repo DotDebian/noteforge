@@ -47,7 +47,6 @@ type ReactRoot = ReturnType<ReactDomClientModule['createRoot']>
 interface Props { doc: Document }
 const props = defineProps<Props>()
 const emit = defineEmits<{
-  (e: 'update:title', value: string): void
   (e: 'update:markdown', value: string): void
 }>()
 
@@ -58,7 +57,12 @@ const docId = computed(() => props.doc.id)
 const saver = useDocumentSaver(docId, 500)
 const ago = useLocalizedTimeAgo(() => saver.lastSavedAt.value ?? new Date())
 
-const title = ref<string>(props.doc.title)
+/**
+ * Read straight off the prop rather than kept in a local ref: there is no title
+ * input here, the header's "Rename" owns it. A ref seeded once would go stale
+ * after a rename and bake the old name into the derived markdown's alt text.
+ */
+const docTitle = computed<string>(() => props.doc.title)
 
 const statusLabel = computed<string>(() => {
   switch (saver.status.value) {
@@ -78,26 +82,6 @@ const statusLabel = computed<string>(() => {
         : ''
   }
 })
-
-/* -------------------------------------------------------------------------- */
-/*  Title                                                                      */
-/* -------------------------------------------------------------------------- */
-
-function onTitleInput(): void {
-  const next = title.value.trim() || t('doc.untitled')
-  saver.save({ title: next })
-  emit('update:title', next)
-}
-
-function onTitleBlur(): void {
-  if (title.value.trim().length === 0) {
-    const fallback = t('doc.untitled')
-    title.value = fallback
-    emit('update:title', fallback)
-  }
-}
-
-watch(() => props.doc.id, () => { title.value = props.doc.title })
 
 /* -------------------------------------------------------------------------- */
 /*  Excalidraw runtime                                                         */
@@ -169,7 +153,7 @@ async function persistNow(): Promise<void> {
   const preview = await buildPreview(elements, appState, files)
   if (disposed) return
 
-  const markdown = buildDrawingMarkdown({ scene, preview, title: title.value })
+  const markdown = buildDrawingMarkdown({ scene, preview, title: docTitle.value })
   saver.save({ contentJson: scene, markdown })
   emit('update:markdown', markdown)
 }
@@ -365,29 +349,9 @@ onBeforeUnmount(() => {
     class="excalidraw-shell"
     :class="{ 'is-fullscreen': isFullscreen }"
   >
-    <!-- Title row — same rhythm as DocumentEditor so switching between a note
-         and a drawing doesn't shift the page. Hidden in fullscreen: the point
-         of fullscreen is that only the canvas is left. -->
-    <div
-      v-show="!isFullscreen"
-      class="mx-auto w-full max-w-3xl xl:max-w-4xl 2xl:max-w-6xl pt-4 md:px-6"
-    >
-      <div class="mb-2 flex items-center justify-between gap-3">
-        <span class="label-mono" aria-live="polite">{{ statusLabel }}</span>
-        <span class="label-mono">{{ t('doc.excalidraw.badge') }}</span>
-      </div>
-      <input
-        v-model="title"
-        type="text"
-        :placeholder="t('doc.editor.titlePlaceholder')"
-        class="title-input"
-        spellcheck="true"
-        @input="onTitleInput"
-        @blur="onTitleBlur"
-      >
-    </div>
-
-    <!-- Canvas -->
+    <!-- No title row: the canvas takes the whole area. Renaming lives in the
+         document header ("Rename"), and the save indicator is the small pill
+         pinned bottom-right next to the fullscreen button. -->
     <div class="excalidraw-area">
       <div ref="hostRef" class="excalidraw-host" />
       <p v-if="status === 'loading'" class="excalidraw-overlay">
@@ -398,7 +362,10 @@ onBeforeUnmount(() => {
       </p>
       <!-- Bottom-right: Excalidraw keeps its own UI top-left (toolbar), top-right
            (library) and bottom-left (zoom / undo), so this corner is the one
-           spot that never collides. -->
+           spot that never collides.
+           The save state used to ride in the title row; without it, this pill is
+           the only feedback that the drawing is being persisted. -->
+      <span v-if="statusLabel" class="save-pill" aria-live="polite">{{ statusLabel }}</span>
       <button
         type="button"
         class="fs-btn"
@@ -449,23 +416,11 @@ html.dark .excalidraw-shell {
   z-index: 70;
 }
 
-.title-input {
-  @apply w-full border-0 bg-transparent font-serif text-4xl font-semibold leading-tight tracking-tight text-ink-900 placeholder:text-ink-300 focus:outline-none focus:ring-0;
-}
-html.dark .title-input {
-  color: theme('colors.ink.50');
-}
-html.dark .title-input::placeholder {
-  color: theme('colors.ink.600');
-}
-
 .excalidraw-area {
   /* `relative` + an absolutely-positioned host: Excalidraw measures its
-     container, and a flex child with an intrinsic size would fight it. */
-  @apply relative mt-4 min-h-0 flex-1 border-t border-ink-200;
-}
-html.dark .excalidraw-area {
-  border-top-color: theme('colors.ink.800');
+     container, and a flex child with an intrinsic size would fight it.
+     No margin and no border — the canvas owns the whole area. */
+  @apply relative min-h-0 flex-1;
 }
 .excalidraw-host {
   @apply absolute inset-0;
@@ -481,6 +436,14 @@ html.dark .excalidraw-area {
   /* Above Excalidraw's own UI layer, which tops out below 10. */
   @apply absolute bottom-4 right-4 z-10 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-ink-200 bg-white/90 text-ink-600 shadow-sm backdrop-blur transition-colors hover:bg-white hover:text-ink-900;
 }
+.save-pill {
+  @apply pointer-events-none absolute bottom-4 right-14 z-10 rounded-lg border border-ink-200 bg-white/90 px-2.5 py-1.5 text-[11px] text-ink-500 shadow-sm backdrop-blur;
+}
+html.dark .save-pill {
+  background: theme('colors.ink.900' / 90%);
+  border-color: theme('colors.ink.700');
+  color: theme('colors.ink.400');
+}
 html.dark .fs-btn {
   background: theme('colors.ink.900' / 90%);
   border-color: theme('colors.ink.700');
@@ -489,9 +452,5 @@ html.dark .fs-btn {
 html.dark .fs-btn:hover {
   background: theme('colors.ink.800');
   color: theme('colors.ink.50');
-}
-/* In fullscreen the border-top of .excalidraw-area is meaningless. */
-.is-fullscreen .excalidraw-area {
-  @apply mt-0 border-t-0;
 }
 </style>
