@@ -405,29 +405,24 @@ async function onRegenerate(msgId: number | string) {
 
 /* ---------------- Regenerate options popover (Wave 2 / I3) ---------------- */
 
-// Ordered cheapest → most expensive. `mistral-medium-latest` is the default —
-// roughly 5× cheaper than Large for ~95% of the quality on RAG-grounded chats.
-// `mistral-large-latest` is opt-in for the cases where Medium drifts.
+// Ordered cheapest → most expensive. Sonnet is the server default; the id is
+// passed through to the Claude Agent SDK as-is.
 const REGEN_MODELS = [
-  { id: 'mistral-small-latest', label: 'Small (fast, $)' },
-  { id: 'mistral-medium-latest', label: 'Medium (default, $$)' },
-  { id: 'mistral-large-latest', label: 'Large (best, $$$)' },
-  { id: 'magistral-medium-latest', label: 'Deep reasoning ($$$)' },
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5 (fast, $)' },
+  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5 (default, $$)' },
+  { id: 'claude-opus-5-5', label: 'Opus 5.5 (best, $$$)' },
 ] as const
 
 const regenOpenForId = ref<number | string | null>(null)
-const regenModel = ref<string>('mistral-medium-latest')
-const regenTemp = ref<number>(0.2)
+const regenModel = ref<string>('claude-sonnet-5-5')
 
 function toggleRegenOptions(msgId: number | string) {
   if (regenOpenForId.value === msgId) {
     regenOpenForId.value = null
     return
   }
-  // Reset to sensible defaults each time we open — matches the chat.post.ts
-  // defaults so what the user sees mirrors what the server would do.
-  regenModel.value = 'mistral-medium-latest'
-  regenTemp.value = 0.2
+  // Reset to the server default each time we open.
+  regenModel.value = 'claude-sonnet-5-5'
   regenOpenForId.value = msgId
 }
 
@@ -439,9 +434,8 @@ async function regenWithOptions(msgId: number | string) {
   if (sending.value) return
   if (!isPersisted(msgId)) return
   const model = regenModel.value
-  const temperature = Number(regenTemp.value)
   closeRegenOptions()
-  await chat.regenerate(msgId, { model, temperature })
+  await chat.regenerate(msgId, { model })
 }
 
 /* ---------------- Feedback (Wave 2 / N3) ---------------- */
@@ -1514,17 +1508,6 @@ const scopeValue = computed(() => {
                       </option>
                     </select>
                   </label>
-                  <label class="regen-label">
-                    <span>{{ t('chat.regenerateTemp') }} <span class="regen-temp-val">{{ Number(regenTemp).toFixed(1) }}</span></span>
-                    <input
-                      v-model.number="regenTemp"
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.1"
-                      class="regen-slider"
-                    >
-                  </label>
                   <div class="regen-actions">
                     <button
                       type="button"
@@ -2192,12 +2175,6 @@ html.dark .regen-popover {
 }
 .regen-input {
   @apply rounded-md border border-ink-200 bg-white px-2 py-1 text-[12px] font-normal normal-case tracking-normal text-ink-800 focus:border-accent-400 focus:outline-none dark:border-ink-700 dark:bg-ink-800 dark:text-ink-100;
-}
-.regen-slider {
-  width: 100%;
-}
-.regen-temp-val {
-  @apply font-mono normal-case tracking-normal text-ink-500 dark:text-ink-400;
 }
 .regen-actions {
   @apply flex items-center justify-end gap-1.5;

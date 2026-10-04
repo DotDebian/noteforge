@@ -40,7 +40,7 @@ function makeSnippet(text: string): string {
  *
  * Preferred path — DOC-LEVEL summary embeddings:
  *   At analyze time we embed each doc's `title + summary + tags` via
- *   `mistral-embed` and store the resulting vector on `doc_analyses.
+ *   the embedding model and store the resulting vector on `doc_analyses.
  *   summary_embedding`. This endpoint compares the current doc's summary
  *   vector against every other doc's summary vector.
  *
@@ -49,7 +49,6 @@ function makeSnippet(text: string): string {
  *   (a mean would dilute the signal across boilerplate paragraphs).
  *
  * Candidates whose raw cosine sits below MIN_COSINE are dropped entirely —
- * mistral-embed's anisotropy puts unrelated docs at ~0.73-0.76 already, so
  * without the floor the panel fills with noise (see related-scoring.ts).
  *
  * On top of the cosine score we add two non-semantic signals (only when

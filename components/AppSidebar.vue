@@ -57,7 +57,7 @@ const L = {
   bulkExport: 'Exporter ZIP',
   bulkAnalyze: 'Analyser & indexer',
   analyzeConfirmTitle: 'Réanalyser & réindexer la sélection ?',
-  analyzeConfirmBody: 'NoteForge va contacter Mistral pour chaque note sélectionnée — y compris toutes les notes des dossiers cochés (analyse + réindexation). Cela peut prendre plusieurs dizaines de secondes.',
+  analyzeConfirmBody: 'NoteForge va contacter Claude et Voyage pour chaque note sélectionnée — y compris toutes les notes des dossiers cochés (analyse + réindexation). Cela peut prendre plusieurs dizaines de secondes.',
   analyzeConfirmYes: 'Réanalyser',
   moveDoneTitle: 'Déplacement terminé',
   movePartial: (ok: number, ko: number) => `${ok} élément(s) déplacé(s), ${ko} en échec.`,

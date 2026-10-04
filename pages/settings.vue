@@ -61,9 +61,9 @@ const L = computed(() => locale.value === 'fr'
         temperature: 'Créativité (température)',
         temperatureHint: '0 = factuel et répétable, 1 = équilibré, > 1 = libre.',
         disableRewriter: 'Désactiver la réécriture de requêtes',
-        disableRewriterHint: 'Économise un appel Mistral par tour. La qualité de récupération peut baisser sur les questions de suivi.',
+        disableRewriterHint: 'Économise un appel Claude par tour. La qualité de récupération peut baisser sur les questions de suivi.',
         disableReranker: 'Désactiver le reclassement',
-        disableRerankerHint: 'Économise un appel Mistral. Le tri par cosinus + BM25 sera utilisé seul.',
+        disableRerankerHint: 'Économise un appel Claude. Le tri par cosinus + BM25 sera utilisé seul.',
         warn: 'Ces préférences ne sont pas encore lues côté serveur — elles seront prises en compte dans un prochain déploiement.',
       },
       notif: {
@@ -144,9 +144,9 @@ const L = computed(() => locale.value === 'fr'
         temperature: 'Creativity (temperature)',
         temperatureHint: '0 = factual and repeatable, 1 = balanced, > 1 = freewheeling.',
         disableRewriter: 'Disable query rewriter',
-        disableRewriterHint: 'Saves one Mistral call per turn. Retrieval quality may dip on follow-up questions.',
+        disableRewriterHint: 'Saves one Claude call per turn. Retrieval quality may dip on follow-up questions.',
         disableReranker: 'Disable LLM reranker',
-        disableRerankerHint: 'Saves one Mistral call. Cosine + BM25 sorting will be used alone.',
+        disableRerankerHint: 'Saves one Claude call. Cosine + BM25 sorting will be used alone.',
         warn: 'These preferences are not yet read server-side — wiring lands in a follow-up.',
       },
       notif: {
@@ -300,7 +300,7 @@ const mcpDialogOpen = ref(false)
 const userPrefs = useUserPreferences()
 const { editor: editorPrefs, ai: aiPrefs, notifications: notifPrefs } = userPrefs
 
-const KNOWN_CHAT_MODELS = ['mistral-small-latest', 'mistral-medium-latest', 'mistral-large-latest']
+const KNOWN_CHAT_MODELS = ['claude-haiku-4-5', 'claude-sonnet-5-5', 'claude-opus-5-5']
 const customModelInput = ref('')
 const useCustomModel = ref(false)
 const prefsBusy = ref<'editor' | 'ai' | 'notifications' | null>(null)

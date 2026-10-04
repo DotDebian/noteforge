@@ -3,11 +3,9 @@ import { and, desc, eq } from 'drizzle-orm'
 import {
   createError,
   defineEventHandler,
-  getRequestHeaders,
   readValidatedBody,
   setHeader,
   setResponseStatus,
-  type H3Event,
 } from 'h3'
 import { useDb } from '~/server/database/client'
 import {
@@ -30,14 +28,17 @@ import {
   encryptChatSources,
 } from '~/server/utils/encrypted-entities'
 import { requireUser } from '~/server/utils/require-user'
+import type { EffortLevel } from '@anthropic-ai/claude-agent-sdk'
 import {
-  mistralChat,
-  mistralChatStream,
-  mistralEmbed,
-  type MistralMessage,
-  type MistralMessageContentPart,
-  type MistralStreamEvent,
-} from '~/server/utils/mistral'
+  CLAUDE_IMAGE_MIMES,
+  claudeChat,
+  claudeChatStream,
+  getClaudeModel,
+  type ChatContentPart,
+  type ChatMessage,
+  type ClaudeImageMime,
+} from '~/server/utils/claude'
+import { embedTextsSoft } from '~/server/utils/embeddings'
 import { bestSentence } from '~/server/utils/best-sentence'
 import { extractCitations } from '~/server/utils/citations'
 import { deriveSessionTitle } from '~/server/utils/chat-title'
@@ -50,7 +51,6 @@ import {
 } from '~/server/utils/search'
 import { rerankChunks, getRerankerCircuitOpen } from '~/server/utils/rerank'
 import { rewriteQuery } from '~/server/utils/query-rewrite'
-import { FAST_MODEL } from '~/server/utils/query-rewrite'
 import { logRagQuality } from '~/server/utils/ragQuality'
 import { tavilySearch, tavilyExtract, type WebSearchDebug } from '~/server/utils/web-search'
 
@@ -59,7 +59,7 @@ import { tavilySearch, tavilyExtract, type WebSearchDebug } from '~/server/utils
 /* -------------------------------------------------------------------------- */
 
 const HISTORY_MAX = 10
-const SNIPPET_MAX = 500           // prompt context: per-chunk cap shown to Mistral
+const SNIPPET_MAX = 500           // prompt context: per-chunk cap shown to the model
                                   // (raised from 320: web search snippets carry the actual
                                   // facts — cutting them off makes the model fall back to the
                                   // title, which is the article name not the entity name.)
@@ -74,7 +74,7 @@ const WEB_EXTRACT_TOP = 2
  *  extracted pages carry the real facts — but still bounded so a 25 KB article
  *  doesn't blow the context window. */
 const WEB_SNIPPET_MAX = 2500
-/** Max base64-inline size for an attachment when the server URL isn't fetchable. */
+/** Max size for an attached image, which is sent to Claude inline as base64. */
 const MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024
 
 /* -------------------------------------------------------------------------- */
@@ -89,6 +89,7 @@ const Body = z.object({
   message: z.string().trim().min(1).max(8000),
   /* ---- Wave 2 / I3 (regenerate-with-options) ---- */
   model: z.string().min(1).max(80).optional(),
+  // Accepted for older clients, ignored: Claude exposes no sampling knobs.
   temperature: z.number().min(0).max(2).optional(),
   /* ---- Wave 2 / N5 (web fallback) ---- */
   webFallback: z.boolean().optional(),
@@ -141,72 +142,30 @@ interface RefinedSource {
 /*  Prompt                                                                     */
 /* -------------------------------------------------------------------------- */
 
-const SYSTEM_PROMPT_BASE = `You are NoteForge Chat, a focused assistant for the user's own notes.
+const SYSTEM_PROMPT_BASE = `You are NoteForge Chat, an assistant that answers questions from the user's own notes.
 
-CONTEXT format:
-You will receive a "CONTEXT" section containing numbered entries. Each entry
-looks like:
+Each turn you receive a CONTEXT section: numbered entries retrieved for this question, formatted as
   [#N] (Note|Web) <title> — <snippet>
-The TITLE is just the source's name (filename for notes, article headline for
-web). The SNIPPET is the actual content. Always read facts from the snippet,
-NEVER from the title — a web title like "Top 10 Alternatives to TIMIFY" is the
-article's headline, not a company name. Extract the real entities from the
-body.
+The title is only the source's name (a note's filename, a web article's headline); the snippet is the actual content. Take facts from snippets, not titles: a web title like "Top 10 Alternatives to TIMIFY" is an article headline, not a company name, and the real entities are named in the body.
 
-CITATION RULES:
-- Cite inline as [#N] using the numeric markers shown next to each entry.
-- Each [#N] must back a SPECIFIC factual claim drawn from that entry's snippet.
-- Do NOT decorate a bullet point with [#N] just because the title contains the
-  topic keyword — only cite when the snippet itself supports the claim.
-- If you have to enumerate items (competitors, features, dates…), extract them
-  from the snippets and group them. Do NOT list source titles as if they were
-  the items themselves.
+Citations:
+- Cite inline as [#N], using the number shown next to the entry. The app turns these markers into clickable source chips, and only the entries you cite are shown to the user.
+- Each [#N] should back a specific claim that the entry's snippet supports. Don't attach a citation just because the title mentions the topic.
+- When you enumerate items (competitors, features, dates…), extract them from the snippets and group them, rather than listing source titles as if they were the items.
 
-CRITICAL — what you CAN and CANNOT do this turn:
-- You CANNOT take actions between turns. You cannot "go look", "search now",
-  "check later", or run any process while writing this reply.
-- NEVER write filler like "[searching…]", "let me look", "un instant",
-  "I'll go check", or any phrasing that implies background work. Either the
-  answer is in CONTEXT already, or it isn't.
-- If the answer is NOT in CONTEXT, say so plainly in ONE short sentence
-  ("Je n'ai pas trouvé cette information dans tes notes." / "I don't see this
-  in your notes."). Do not fabricate facts to fill the gap.
+You answer in a single reply and cannot act between turns: retrieval already ran before you were called, so there is nothing left to "go look up". Don't write things like "let me check", "un instant" or "[searching…]"; either the answer is in CONTEXT or it isn't. When it isn't, say so plainly in one short sentence ("Je n'ai pas trouvé cette information dans tes notes." / "I don't see this in your notes.") rather than filling the gap with guesses.
 
-Be concise. Prefer short paragraphs over long bullet lists. Reply in the user's
-language.`
+Be concise: short paragraphs rather than long bullet lists. Reply in the user's language.`
 
-const SYSTEM_PROMPT_WEB_OFF = `You do NOT have web access this turn. If the user asks anything that would
-require external sources (who, what, when about a person/product/event you
-have no info on, current events, prices, etc.), reply concisely:
-"Je n'ai pas trouvé cette information dans tes notes. Active l'option
-\\"Chercher sur le web\\" dans la barre de saisie pour que je puisse aller
-voir en ligne."  (or the English equivalent if the user is writing in
-English). Do NOT invent facts. Do NOT pretend you searched.`
+const SYSTEM_PROMPT_WEB_OFF = `Web search is not available this turn. If the question needs external sources (a person, product or event the notes say nothing about, current events, prices…), reply concisely: "Je n'ai pas trouvé cette information dans tes notes. Active l'option \\"Chercher sur le web\\" dans la barre de saisie pour que je puisse aller voir en ligne." (or the English equivalent if the user writes in English). Don't invent facts and don't imply that you searched.`
 
-const SYSTEM_PROMPT_WEB_ON_HIT = `Web search ran for this turn and returned results, marked "(Web)" in CONTEXT.
+const SYSTEM_PROMPT_WEB_ON_HIT = `A web search ran for this turn; its results are the entries marked "(Web)" in CONTEXT.
 
-How to use web results correctly:
-- The TITLE of a web entry is an article headline, NOT a company / product /
-  person name. Example: "[#7] (Web) Top 10 Alternatives to TIMIFY — <snippet>"
-  is an ARTICLE about Timify alternatives. The actual alternatives are NAMED
-  INSIDE the snippet.
-- When the user asks "what are X's competitors?" or "who is X?" or any
-  entity-extraction question, pull the entity names from the SNIPPETS and
-  group them. Cite each named entity with the [#N] of the snippet that
-  mentioned it. Never list article titles as if they were the answer.
-- RELEVANCE CHECK: web results are keyword matches and may be about a COMPLETELY
-  different subject that merely shares a name (a different game, franchise, or
-  product). If a result is not clearly about the SAME thing the user is asking
-  about — especially when the notes establish a specific universe/context —
-  IGNORE it: do not cite it, do not mention it. If none of the results actually
-  match, say plainly that nothing relevant was found online. Never stitch an
-  unrelated result (e.g. a World-of-Warcraft page for a Minecraft item) into the
-  answer.
-- When snippets disagree or are sparse, say so explicitly. Don't pad.`
+- A web entry's title is an article headline, not a company, product or person name. "[#7] (Web) Top 10 Alternatives to TIMIFY — <snippet>" is an article about Timify alternatives; the alternatives themselves are named inside the snippet. For entity questions ("what are X's competitors?", "who is X?"), pull the names from the snippets, group them, and cite each with the [#N] of the snippet that mentions it.
+- Web results are keyword matches and can be about a different subject that merely shares a name (another game, franchise or product). Use a result only if it is clearly about the same thing the user is asking about, especially when the notes establish a specific universe or context; otherwise leave it out entirely, uncited and unmentioned. For example, a World-of-Warcraft page is not a source for a Minecraft item. If none of the results match, say plainly that nothing relevant was found online.
+- When snippets disagree or are sparse, say so rather than padding.`
 
-const SYSTEM_PROMPT_WEB_ON_MISS = `Web search ran for this turn but returned no usable results. Tell the user
-plainly in ONE sentence that nothing matched online (in their language). Do
-NOT pretend further search is happening; do NOT invent facts.`
+const SYSTEM_PROMPT_WEB_ON_MISS = `A web search ran for this turn but returned no usable results. Tell the user in one sentence, in their language, that nothing matched online. Don't suggest that more searching is under way, and don't invent facts.`
 
 /**
  * Sentinel the model emits on the FIRST (notes-only) pass when the notes don't
@@ -216,25 +175,26 @@ NOT pretend further search is happening; do NOT invent facts.`
  */
 const NO_NOTES_SENTINEL = '__NO_NOTES__'
 
-const SYSTEM_PROMPT_NOTES_FIRST = `Answer the user's question using ONLY the notes in CONTEXT.
+const SYSTEM_PROMPT_NOTES_FIRST = `Answer the user's question using only the notes in CONTEXT.
 
 - If CONTEXT contains the answer, reply normally with inline [#N] citations.
-- If CONTEXT does NOT contain the answer — or only holds loosely-related notes
-  that don't actually answer it — your ENTIRE reply must be exactly this token,
-  with nothing before or after it:
+- If it does not (including when it only holds loosely related notes that don't actually answer the question), your entire reply must be exactly this token, with nothing before or after it:
 ${NO_NOTES_SENTINEL}
-  In that case do NOT apologize, do NOT explain, do NOT write a sentence — output
-  only the token. This OVERRIDES any earlier instruction to say you didn't find
-  it: a web search will run automatically and you'll answer from its results.
-- Never pad a non-answer. Either the notes answer it (reply) or they don't
-  (emit the token, nothing else).`
+  The app intercepts that token, runs a web search and asks you again with the results, so the user never sees it. That is why no apology or explanation should accompany it, and why it takes precedence over the instruction above to say you didn't find the information.
+- Either the notes answer the question (reply) or they don't (the token alone); don't pad a non-answer.`
 
 /**
- * Extra system prompt when the user has allowed write tools. Spelled out
- * explicitly so the model knows the tools are for note mutations (not
- * generic search). All tool calls go through a user-approval gate.
+ * System prompt for the write-action probe, sent when the user has allowed
+ * note mutations. Every proposed action goes through a user-approval gate.
  */
-const TOOLS_SYSTEM_PROMPT = `You may also call note-mutation tools (\`create_note\`, \`update_note\`, \`delete_note\`) when the user explicitly asks you to author or modify a note. Every tool call requires the user's approval before it runs — so be clear about what you intend to do. Prefer a single tool call per turn.`
+const WRITE_PROBE_PROMPT = `The user has enabled note editing for this conversation. You can propose note actions, which the app shows them as an approve/reject card; nothing runs until they approve.
+
+Available actions:
+- create_note: create a note in the current workspace. Needs "title" and "markdown" (the full body). Optional "folderId"; leave it out for the workspace root.
+- update_note: change an existing note. Needs "documentId", plus "title" and/or "markdown" for the fields to change; "markdown" replaces the whole body.
+- delete_note: move a note to the trash (reversible from the trash UI). Needs "documentId".
+
+Propose an action only when the user's current message explicitly asks you to write, modify or delete a note. For anything else (a question, a discussion), return an empty "calls" array and an empty "message": the question is then answered in a separate step. Prefer a single action per turn. When you do propose one, "message" is one short sentence in the user's language saying what you intend to do.`
 
 function truncate(s: string, n: number): string {
   const cleaned = s.replace(/\s+/g, ' ').trim()
@@ -247,61 +207,28 @@ function sseFrame(payload: unknown): string {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Vision helpers (N7)                                                        */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Build a fetchable absolute URL Mistral's servers can pull the image from.
- * In local dev this lands on `localhost`/`127.0.0.1` which Mistral can't
- * reach — callers should detect that case and fall back to base64 inlining.
- */
-function buildAttachmentUrl(event: H3Event, attachmentId: number): string {
-  const headers = getRequestHeaders(event)
-  const proto = (headers['x-forwarded-proto'] as string | undefined) ?? 'http'
-  const host = (headers['host'] as string | undefined) ?? 'localhost:3000'
-  return `${proto}://${host}/api/uploads/${attachmentId}`
-}
-
-function isLocalHost(host: string): boolean {
-  const h = host.toLowerCase()
-  return h.startsWith('localhost')
-    || h.startsWith('127.0.0.1')
-    || h.startsWith('0.0.0.0')
-    || h.startsWith('::1')
-    || /^192\.168\./.test(h)
-    || /^10\./.test(h)
-}
-
-
-/* -------------------------------------------------------------------------- */
 /*  Suggested follow-ups (N4)                                                   */
 /* -------------------------------------------------------------------------- */
 
 async function generateFollowups(question: string, answer: string, userId: number): Promise<string[]> {
   try {
-    const { content } = await mistralChat({
+    const { content } = await claudeChat({
       messages: [
         {
           role: 'system',
-          content: 'You suggest 2-3 short, natural follow-up questions the user might ask next, in the user\'s language. Respond as JSON: {"questions": ["…", "…"]}. Keep each question under 100 chars. Do not number them.',
+          content: 'You suggest follow-up questions for a chat about the user\'s notes. Given the question they asked and the answer they received, write 2 or 3 short, natural questions they might ask next, in the user\'s language, each under 100 characters. They are shown as clickable chips, so output one question per line and nothing else: no numbering, no bullets, no introduction.',
         },
         {
           role: 'user',
-          content: `Question:\n${truncate(question, 600)}\n\nAnswer:\n${truncate(answer, 1200)}\n\nReturn JSON.`,
+          content: `Question:\n${truncate(question, 600)}\n\nAnswer:\n${truncate(answer, 1200)}`,
         },
       ],
-      jsonMode: true,
-      temperature: 0.3,
-      model: FAST_MODEL,
       userId,
       operation: 'followups',
     })
-    const parsed = JSON.parse(content) as { questions?: unknown }
-    if (!Array.isArray(parsed.questions)) return []
     const out: string[] = []
-    for (const q of parsed.questions) {
-      if (typeof q !== 'string') continue
-      const cleaned = q.trim()
+    for (const line of content.split('\n')) {
+      const cleaned = line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim()
       if (cleaned.length === 0 || cleaned.length > 200) continue
       out.push(cleaned)
       if (out.length >= 3) break
@@ -314,58 +241,39 @@ async function generateFollowups(question: string, answer: string, userId: numbe
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Agentic tool descriptors (N8)                                              */
+/*  Agentic write actions (N8)                                                 */
 /* -------------------------------------------------------------------------- */
 
-const WRITE_TOOLS = [
-  {
-    type: 'function' as const,
-    function: {
-      name: 'create_note',
-      description: 'Create a new note in the current workspace. The user will be asked to approve before the note is created.',
-      parameters: {
+const WRITE_ACTIONS = ['create_note', 'update_note', 'delete_note'] as const
+
+/**
+ * Structured-output schema for the write probe. Arguments are flat on the
+ * call object (each action reads the subset it needs) so the schema stays
+ * closed — `toProposedCalls` reshapes them into `{ name, arguments }`.
+ */
+const WRITE_PROBE_SCHEMA = {
+  type: 'object',
+  properties: {
+    message: { type: 'string' },
+    calls: {
+      type: 'array',
+      items: {
         type: 'object',
         properties: {
-          workspaceId: { type: 'number', description: 'Workspace id (use the active workspace).' },
-          folderId: { type: ['number', 'null'], description: 'Optional folder to place the note in. Null for the workspace root.' },
-          title: { type: 'string', description: 'Title of the note.' },
-          markdown: { type: 'string', description: 'Initial markdown body.' },
-        },
-        required: ['workspaceId', 'title', 'markdown'],
-      },
-    },
-  },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'update_note',
-      description: 'Patch an existing note. Pass only the fields you want to change.',
-      parameters: {
-        type: 'object',
-        properties: {
-          documentId: { type: 'number', description: 'Id of the note to update.' },
+          name: { type: 'string', enum: [...WRITE_ACTIONS] },
+          folderId: { type: 'number' },
+          documentId: { type: 'number' },
           title: { type: 'string' },
           markdown: { type: 'string' },
         },
-        required: ['documentId'],
+        required: ['name'],
+        additionalProperties: false,
       },
     },
   },
-  {
-    type: 'function' as const,
-    function: {
-      name: 'delete_note',
-      description: 'Move a note to the trash. Reversible from the trash UI.',
-      parameters: {
-        type: 'object',
-        properties: {
-          documentId: { type: 'number' },
-        },
-        required: ['documentId'],
-      },
-    },
-  },
-]
+  required: ['message', 'calls'],
+  additionalProperties: false,
+}
 
 interface ProposedToolCall {
   name: string
@@ -373,28 +281,41 @@ interface ProposedToolCall {
 }
 
 /**
- * Inspect a non-streaming Mistral response and extract any function-style
- * tool calls. Returns an empty array when the model chose to just chat.
+ * Turn the probe's structured output into the tool calls the client's
+ * approval card expects, dropping any call missing what its action needs.
+ * Returns an empty array when the model chose to just chat.
  */
-function extractToolCalls(raw: unknown): ProposedToolCall[] {
+function toProposedCalls(structured: unknown, workspaceId: number): ProposedToolCall[] {
+  const calls = (structured as { calls?: unknown })?.calls
+  if (!Array.isArray(calls)) return []
   const out: ProposedToolCall[] = []
-  const message = (raw as { choices?: Array<{ message?: { tool_calls?: unknown[] } }> })
-    ?.choices?.[0]?.message
-  const calls = message?.tool_calls
-  if (!Array.isArray(calls)) return out
   for (const c of calls) {
     if (!c || typeof c !== 'object') continue
-    const fn = (c as { function?: { name?: string, arguments?: unknown } }).function
-    if (!fn?.name) continue
-    let args: Record<string, unknown> = {}
-    if (typeof fn.arguments === 'string') {
-      try { args = JSON.parse(fn.arguments) as Record<string, unknown> }
-      catch { args = {} }
+    const { name, folderId, documentId, title, markdown } = c as Record<string, unknown>
+    if (name === 'create_note') {
+      if (typeof title !== 'string' || typeof markdown !== 'string') continue
+      // We only let the call run against the current workspace anyway.
+      out.push({
+        name,
+        arguments: { workspaceId, folderId: typeof folderId === 'number' ? folderId : null, title, markdown },
+      })
     }
-    else if (fn.arguments && typeof fn.arguments === 'object') {
-      args = fn.arguments as Record<string, unknown>
+    else if (name === 'update_note') {
+      if (typeof documentId !== 'number') continue
+      if (typeof title !== 'string' && typeof markdown !== 'string') continue
+      out.push({
+        name,
+        arguments: {
+          documentId,
+          ...(typeof title === 'string' ? { title } : {}),
+          ...(typeof markdown === 'string' ? { markdown } : {}),
+        },
+      })
     }
-    out.push({ name: fn.name, arguments: args })
+    else if (name === 'delete_note') {
+      if (typeof documentId !== 'number') continue
+      out.push({ name, arguments: { documentId } })
+    }
   }
   return out
 }
@@ -474,14 +395,12 @@ export default defineEventHandler(async (event) => {
   /* ---------- 1b. Resolve attachment (N7) -------------------------------- */
   // Loaded eagerly so we can reject early if the user supplied a bad id.
   // Two outputs:
-  //  - `imageContentPart`: the `image_url` chunk to splice into the final
-  //    user message when calling Mistral. Built lazily so we don't read the
-  //    file off disk unless we need the base64 fallback path.
+  //  - `imageContentPart`: the base64 image part to splice into the final
+  //    user message when calling Claude.
   //  - `messageMarkdownPrefix`: an inline markdown image tag the chat
   //    component renders as a thumbnail above the user's text.
-  let imageContentPart: MistralMessageContentPart | null = null
+  let imageContentPart: ChatContentPart | null = null
   let messageMarkdownPrefix = ''
-  let visionRouting: 'pixtral' | null = null
 
   if (input.attachmentId != null) {
     const [rec] = await db
@@ -499,36 +418,29 @@ export default defineEventHandler(async (event) => {
       throw createError({ statusCode: 415, statusMessage: 'Attachment must be an image' })
     }
 
-    // Pick the URL path Mistral will actually be able to fetch.
-    const headers = getRequestHeaders(event)
-    const host = (headers['host'] as string | undefined) ?? ''
-    const useInline = host === '' || isLocalHost(host)
-
-    if (useInline) {
+    const mediaType = CLAUDE_IMAGE_MIMES.find((m): m is ClaudeImageMime => m === rec.mime)
+    if (!mediaType) {
+      console.warn(`[ai/chat] attachment ${rec.id} has a mime Claude can't read (${rec.mime}) — skipping image`)
+    }
+    else {
       try {
         const buf = await readAttachment(rec)
         if (buf.byteLength > MAX_INLINE_IMAGE_BYTES) {
           console.warn(`[ai/chat] attachment ${rec.id} too large for base64 inline (${buf.byteLength} bytes) — skipping image`)
         }
         else {
-          const dataUrl = `data:${rec.mime};base64,${buf.toString('base64')}`
-          imageContentPart = { type: 'image_url', image_url: dataUrl }
+          imageContentPart = { type: 'image', mediaType, data: buf.toString('base64') }
         }
       }
       catch (err) {
         console.warn('[ai/chat] failed to inline attachment', rec.id, (err as Error).message)
       }
     }
-    else {
-      imageContentPart = { type: 'image_url', image_url: buildAttachmentUrl(event, rec.id) }
-    }
 
-    // Whether or not the image actually made it through to Mistral, we surface
+    // Whether or not the image actually made it through to Claude, we surface
     // the inline reference in the persisted markdown so the chat history shows
     // a thumbnail. Use the relative URL — the client served it.
     messageMarkdownPrefix = `![image](/api/uploads/${rec.id})\n\n`
-
-    if (imageContentPart != null) visionRouting = 'pixtral'
   }
 
   /* ---------- 2. Persist the user message -------------------------------- */
@@ -555,7 +467,7 @@ export default defineEventHandler(async (event) => {
     history.pop()
   }
 
-  const historyMessages: MistralMessage[] = history
+  const historyMessages: ChatMessage[] = history
     .filter(h => h.role === 'user' || h.role === 'assistant')
     .map(h => ({ role: h.role as 'user' | 'assistant', content: decryptChatMessageContent(h.content, dek) }))
     .slice(-HISTORY_MAX)
@@ -586,7 +498,7 @@ export default defineEventHandler(async (event) => {
   }
 
   // The "real" user message — string when plain, array when an image was attached.
-  const finalUserContent: MistralMessage['content'] = imageContentPart
+  const finalUserContent: ChatMessage['content'] = imageContentPart
     ? [
         { type: 'text', text: input.message },
         imageContentPart,
@@ -594,40 +506,28 @@ export default defineEventHandler(async (event) => {
     : input.message
 
   // Assemble the full message list: base policy + capability clause + the
-  // retrieved CONTEXT block + optional tools clause, then history + user turn.
+  // retrieved CONTEXT block, then history + user turn.
   // `capabilityClause` shifts across passes: pass 1 gets the notes-first probe
-  // clause; after a web search runs, pass 2 gets the hit/miss guidance.
-  function composeMessages(capabilityClause: string, srcs: AnySource[]): MistralMessage[] {
-    const systemMessages: MistralMessage[] = [
+  // clause; after a web search runs, pass 2 gets the hit/miss guidance. The
+  // write probe passes its own clause last.
+  function composeMessages(capabilityClause: string, srcs: AnySource[], extraClause?: string): ChatMessage[] {
+    const systemMessages: ChatMessage[] = [
       { role: 'system', content: SYSTEM_PROMPT_BASE },
       { role: 'system', content: capabilityClause },
       { role: 'system', content: buildContextBlock(srcs) },
     ]
-    if (input.allowWrites) {
-      systemMessages.push({ role: 'system', content: TOOLS_SYSTEM_PROMPT })
+    if (extraClause) {
+      systemMessages.push({ role: 'system', content: extraClause })
     }
     return [...systemMessages, ...historyMessages, { role: 'user', content: finalUserContent }]
   }
 
   /* ---------- 6b. Model routing ------------------------------------------ */
-  // Vision wins when an image is in play and the caller didn't pin a model.
-  // For reasoning + image at the same time, image wins (Magistral isn't a
-  // vision model). When the caller passed an explicit non-vision model with
-  // an image, log a console.warn so the choice is visible in dev logs.
-  let chatModel: string | undefined = input.model
-  if (visionRouting === 'pixtral') {
-    if (chatModel == null) {
-      chatModel = 'pixtral-large-latest'
-    }
-    else if (!chatModel.toLowerCase().includes('pixtral')) {
-      console.warn(`[ai/chat] image attached but caller pinned non-vision model "${chatModel}" — Mistral may ignore the image`)
-    }
-  }
-  else if (chatModel == null && input.reasoning) {
-    chatModel = 'magistral-medium-latest'
-  }
-  const chatTemperature = input.temperature
-    ?? (input.reasoning && input.model == null ? 0.4 : 0.2)
+  // One model handles text and images alike. A caller-pinned model is honoured
+  // only when it is a Claude id (older clients may still send a Mistral one);
+  // "deep reasoning" raises the effort instead of switching model.
+  const chatModel: string | undefined = input.model?.startsWith('claude-') ? input.model : undefined
+  const chatEffort: EffortLevel | undefined = input.reasoning ? 'high' : undefined
 
   /* ---------- 7. Stream the response ------------------------------------- */
   setHeader(event, 'Content-Type', 'text/event-stream; charset=utf-8')
@@ -647,10 +547,6 @@ export default defineEventHandler(async (event) => {
       const send = (obj: unknown) => controller.enqueue(enc.encode(sseFrame(obj)))
       let collected = ''
       let errored = false
-      // Native citations (I6): when Mistral streams `reference` chunks we
-      // record the 1-based source indices it actually referenced.
-      const nativeCited = new Set<number>()
-
       send({ type: 'session', sessionId: finalSessionId })
 
       // Whether the model actually ran a web search this turn — resolved during
@@ -679,7 +575,8 @@ export default defineEventHandler(async (event) => {
         send({ type: 'step', step: 'thinking', status: 'done' })
 
         send({ type: 'step', step: 'notes', status: 'running' })
-        const queryVectors = await mistralEmbed([retrievalQuery], { userId, operation: 'embed_query' })
+        // Failure-soft: an empty vector makes `rankChunks` go BM25-only.
+        const queryVectors = await embedTextsSoft([retrievalQuery], { inputType: 'query', userId, operation: 'embed_query' })
         const queryVec = queryVectors[0] ?? []
 
         const docFilters = effectiveDocId != null
@@ -761,42 +658,32 @@ export default defineEventHandler(async (event) => {
         return
       }
 
-      // Base prompt for the optional write-tool probe (allowWrites). The web
-      // policy is applied per-pass in the streaming section below.
-      const messages: MistralMessage[] = composeMessages(SYSTEM_PROMPT_WEB_OFF, sources)
-
-      // N8 — tool-call pre-flight. When the user toggled `allowWrites`, run a
-      // non-streaming probe first to see if the model wants to call a write
-      // tool. If it does, surface the proposed call to the client and SKIP
-      // streaming text — we don't want the bubble to be half-text-half-action.
-      // The client renders an approve/reject card and posts to
-      // `/api/ai/chat/sessions/:id/tool-call/approve` to execute or cancel.
+      // N8 — write-action pre-flight. When the user toggled `allowWrites`, run
+      // a structured-output probe first to see if the model wants to propose a
+      // note action. If it does, surface the proposed call to the client and
+      // SKIP streaming text — we don't want the bubble to be
+      // half-text-half-action. The client renders an approve/reject card and
+      // posts to `/api/ai/chat/sessions/:id/tool-call/approve` to execute or
+      // cancel.
       let toolCallEmitted = false
       if (allowWrites) {
         try {
-          const probe = await mistralChat({
-            messages,
-            tools: WRITE_TOOLS,
-            toolChoice: 'auto',
-            temperature: chatTemperature,
+          const probe = await claudeChat({
+            messages: composeMessages(SYSTEM_PROMPT_WEB_OFF, sources, WRITE_PROBE_PROMPT),
+            jsonSchema: WRITE_PROBE_SCHEMA,
             userId,
             operation: 'chat_tool_probe',
             ...(chatModel ? { model: chatModel } : {}),
+            ...(chatEffort ? { effort: chatEffort } : {}),
           })
-          const calls = extractToolCalls(probe.raw)
+          const calls = toProposedCalls(probe.structured, input.workspaceId)
           if (calls.length > 0) {
-            // Inject the workspace id when the model forgot it — we only let
-            // the call run against the current workspace anyway.
-            for (const c of calls) {
-              if (c.name === 'create_note' && c.arguments.workspaceId == null) {
-                c.arguments.workspaceId = input.workspaceId
-              }
-            }
             send({ type: 'tool_call_pending', calls })
-            // Place a short placeholder in the assistant bubble so the user
+            // Place a short sentence in the assistant bubble so the user
             // sees something coherent instead of an empty message.
-            const placeholder = probe.content.trim().length > 0
-              ? probe.content.trim()
+            const message = (probe.structured as { message?: unknown }).message
+            const placeholder = typeof message === 'string' && message.trim().length > 0
+              ? message.trim()
               : 'I would like to perform the following action — please review and approve.'
             collected = placeholder
             send({ type: 'delta', text: placeholder })
@@ -820,43 +707,20 @@ export default defineEventHandler(async (event) => {
         // So the web fires automatically only when the notes come up short —
         // no manual toggle, no off-topic results dragged into a grounded answer.
 
-        // Fold native `reference` citations into the cited set (shared by passes).
-        const recordReferences = (refs: Extract<MistralStreamEvent, { kind: 'reference' }>['refs']): void => {
-          for (const r of refs) {
-            if (typeof r.id === 'number' && r.id >= 1 && r.id <= sources.length) {
-              nativeCited.add(r.id)
-              continue
-            }
-            if (typeof r.url === 'string' && r.url.length > 0) {
-              const idx = sources.findIndex(s => 'url' in s && (s as WebSourceRef).url === r.url)
-              if (idx >= 0) { nativeCited.add(idx + 1); continue }
-            }
-            if (typeof r.title === 'string' && r.title.length > 0) {
-              const needle = r.title.trim().toLowerCase()
-              const idx = sources.findIndex(s => s.title.trim().toLowerCase() === needle)
-              if (idx >= 0) { nativeCited.add(idx + 1); continue }
-            }
-          }
+        const streamOpts = {
+          userId,
+          operation: 'chat_stream',
+          ...(chatModel ? { model: chatModel } : {}),
+          ...(chatEffort ? { effort: chatEffort } : {}),
         }
 
-        // Stream a message list straight through (deltas + citations). Returns
-        // false when the Mistral call errored (an error frame was already sent).
-        const streamAnswer = async (msgs: MistralMessage[]): Promise<boolean> => {
+        // Stream a message list straight through. Returns false when the
+        // Claude call errored (an error frame was already sent).
+        const streamAnswer = async (msgs: ChatMessage[]): Promise<boolean> => {
           try {
-            for await (const ev of mistralChatStream({
-              messages: msgs,
-              temperature: chatTemperature,
-              userId,
-              operation: 'chat_stream',
-              ...(chatModel ? { model: chatModel } : {}),
-            })) {
-              if (ev.kind === 'text') {
-                collected += ev.text
-                send({ type: 'delta', text: ev.text })
-              }
-              else if (ev.kind === 'reference') {
-                recordReferences(ev.refs)
-              }
+            for await (const text of claudeChatStream({ messages: msgs, ...streamOpts })) {
+              collected += text
+              send({ type: 'delta', text })
             }
             return true
           }
@@ -865,7 +729,7 @@ export default defineEventHandler(async (event) => {
             const detail = (err as { data?: { detail?: string }, message?: string }).data?.detail
               ?? (err as Error).message
               ?? 'unknown error'
-            send({ type: 'error', error: 'mistral_failed', detail })
+            send({ type: 'error', error: 'claude_failed', detail })
             return false
           }
         }
@@ -874,25 +738,17 @@ export default defineEventHandler(async (event) => {
         // NO_NOTES_SENTINEL is intercepted (not shown) and turned into a web
         // escalation. Returns 'needWeb' to escalate, 'answered' when the notes
         // answer was streamed, 'error' on failure.
-        const answerFromNotes = async (msgs: MistralMessage[]): Promise<'answered' | 'needWeb' | 'error'> => {
+        const answerFromNotes = async (msgs: ChatMessage[]): Promise<'answered' | 'needWeb' | 'error'> => {
           let buffer = ''
           let decided = false
           try {
-            for await (const ev of mistralChatStream({
-              messages: msgs,
-              temperature: chatTemperature,
-              userId,
-              operation: 'chat_stream',
-              ...(chatModel ? { model: chatModel } : {}),
-            })) {
-              if (ev.kind === 'reference') { recordReferences(ev.refs); continue }
-              if (ev.kind !== 'text') continue
+            for await (const text of claudeChatStream({ messages: msgs, ...streamOpts })) {
               if (decided) {
-                collected += ev.text
-                send({ type: 'delta', text: ev.text })
+                collected += text
+                send({ type: 'delta', text })
                 continue
               }
-              buffer += ev.text
+              buffer += text
               const compact = buffer.replace(/\s/g, '')
               // Still ambiguous: the buffer could yet grow into the sentinel.
               if (compact.length < NO_NOTES_SENTINEL.length && NO_NOTES_SENTINEL.startsWith(compact)) continue
@@ -917,7 +773,7 @@ export default defineEventHandler(async (event) => {
             const detail = (err as { data?: { detail?: string }, message?: string }).data?.detail
               ?? (err as Error).message
               ?? 'unknown error'
-            send({ type: 'error', error: 'mistral_failed', detail })
+            send({ type: 'error', error: 'claude_failed', detail })
             return 'error'
           }
         }
@@ -982,7 +838,7 @@ export default defineEventHandler(async (event) => {
       }
 
       // ---- Post-stream refinement -----------------------------------------
-      const cited = nativeCited.size > 0 ? nativeCited : extractCitations(collected)
+      const cited = extractCitations(collected)
       const refined: RefinedSource[] = []
       for (let i = 0; i < sources.length; i++) {
         const n = i + 1
@@ -1024,9 +880,7 @@ export default defineEventHandler(async (event) => {
         : []
 
       // ---- Per-turn meta (persisted + sent for the debug panel / web badge) -
-      const effectiveModel = chatModel
-        ?? (useRuntimeConfig().mistralChatModel as string | undefined)
-        ?? 'mistral-medium-latest'
+      const effectiveModel = getClaudeModel(chatModel)
       const metaObj = {
         model: effectiveModel,
         webRequested: input.webFallback === true,
@@ -1044,7 +898,7 @@ export default defineEventHandler(async (event) => {
         allowWrites,
         scopeDocId: effectiveDocId,
         scopeFolderId: effectiveFolderId,
-        temperature: chatTemperature,
+        temperature: null,
       }
 
       let persistedMessageId: number | null = null

@@ -289,7 +289,7 @@ onBeforeUnmount(() => io?.disconnect())
           <g class="pl-box" transform="translate(168 38)">
             <rect width="132" height="54" rx="6" />
             <text x="66" y="24" text-anchor="middle" class="pl-label">RÉÉCRITURE</text>
-            <text x="66" y="40" text-anchor="middle" class="pl-sub">mistral-small</text>
+            <text x="66" y="40" text-anchor="middle" class="pl-sub">claude-sonnet</text>
           </g>
           <g class="pl-box pl-box-double" transform="translate(340 14)">
             <rect width="148" height="36" rx="6" />

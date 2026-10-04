@@ -16,8 +16,12 @@ interface UsageData {
   errorRateByModel: ErrorRateRow[]
 }
 
-// Mistral pricing (USD / M tokens) as of 2025
+// Public API pricing (USD / M tokens). Claude calls made with a subscription
+// OAuth token aren't billed per token — the figure is then a list-price equivalent.
 const PRICING: Record<string, { prompt: number, completion: number }> = {
+  'claude-sonnet-5-5': { prompt: 2, completion: 10 },
+  // Covered by Voyage's free token allowance.
+  'voyage-4-large': { prompt: 0, completion: 0 },
   'mistral-embed': { prompt: 0.1, completion: 0 },
   'mistral-small-latest': { prompt: 0.2, completion: 0.6 },
   'mistral-large-latest': { prompt: 2, completion: 6 },
@@ -239,7 +243,7 @@ function fmtMs(n: number) { return `${n.toLocaleString('fr-FR')} ms` }
       <div class="cost-banner">
         Coût estimé (période complète) :
         <strong>{{ fmtEur(totalCostEur) }}</strong>
-        <span class="cost-note">basé sur les tarifs publics Mistral</span>
+        <span class="cost-note">basé sur les tarifs publics Claude / Mistral</span>
       </div>
 
       <!-- By model -->

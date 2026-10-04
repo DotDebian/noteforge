@@ -4,7 +4,7 @@
  * Streams the transformed text back as SSE so the editor can replace the
  * user's selection live (similar UX to ChatGPT inline rewrite). Each action
  * has its own crafted system prompt; the user text is dropped in as the
- * user message so we keep the Mistral chat shape unchanged.
+ * user message.
  *
  * Frames:
  *   data: {"type":"delta","text":"…"}
@@ -12,7 +12,7 @@
  *   data: {"type":"error","detail":"…"}
  */
 import { z } from 'zod'
-import { mistralChatStream, type MistralMessage } from '~/server/utils/mistral'
+import { claudeChatStream, type ChatMessage } from '~/server/utils/claude'
 import { requireUser } from '~/server/utils/require-user'
 
 const ACTIONS = [
@@ -67,7 +67,7 @@ export default defineEventHandler(async (event) => {
   await requireUser(event)
   const body = await readValidatedBody(event, (v) => Body.parse(v))
 
-  const messages: MistralMessage[] = [
+  const messages: ChatMessage[] = [
     { role: 'system', content: systemPromptFor(body.action, body.option) },
     { role: 'user', content: body.text },
   ]
@@ -85,9 +85,8 @@ export default defineEventHandler(async (event) => {
         controller.enqueue(enc.encode(`data: ${JSON.stringify(payload)}\n\n`))
       }
       try {
-        for await (const ev of mistralChatStream({ messages, temperature: 0.3 })) {
-          // Transform doesn't enable tools, so only text events are expected.
-          if (ev.kind === 'text' && ev.text.length > 0) emit({ type: 'delta', text: ev.text })
+        for await (const text of claudeChatStream({ messages, operation: 'transform' })) {
+          emit({ type: 'delta', text })
         }
         emit({ type: 'done' })
       }

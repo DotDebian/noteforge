@@ -3,7 +3,7 @@
  *
  * Embedding a follow-up like "et le deuxième point ?" verbatim wastes the
  * embed call — the meaningful tokens live in the prior turns. Before the
- * retrieval step, we ask Mistral to rewrite the user's current message into
+ * retrieval step, we ask Claude to rewrite the user's current message into
  * a standalone query that carries forward the relevant context. The chat
  * message sent to the model is untouched: only the *retrieval* query is
  * reformulated.
@@ -11,11 +11,8 @@
  * Failure modes are silent on purpose: a failed rewrite returns the original
  * message so chat never blocks on this auxiliary call.
  */
-import { mistralChat, type MistralMessage } from './mistral'
+import { claudeChat, type ChatMessage } from './claude'
 import { createCircuitBreaker } from './circuit-breaker'
-
-/** Small model for cheap auxiliary calls (rewrite + rerank). */
-export const FAST_MODEL = 'mistral-small-latest'
 
 /**
  * Breaker for the rewriter. Same 3-failures-in-60s / 60s cooldown contract
@@ -29,32 +26,24 @@ export function getRewriterCircuitOpen(): boolean {
   return rewriterBreaker.isOpen()
 }
 
-const SYSTEM_PROMPT = `You rewrite the user's latest message into a SELF-CONTAINED retrieval query.
+const SYSTEM_PROMPT = `You rewrite the user's latest message into a self-contained retrieval query for a search over their personal notes. The query is embedded and keyword-matched, so it has to carry its own context: the search engine never sees the conversation.
 
-Rules:
-- Resolve pronouns and anaphora using the conversation history.
-- Preserve the user's language and key technical terms verbatim.
-- Output ONLY the rewritten query, no preamble, no quotes, no explanation.
-- If the latest message is already standalone, return it unchanged.
-- If the latest message is purely conversational (greeting, thanks, meta-question
-  about the assistant itself), return it unchanged — don't invent topics.
-- Keep it short: a phrase or a single sentence, never a paragraph.
+- Resolve pronouns and references ("it", "the second point", "et celui-là ?") using the conversation history.
+- Keep the user's language and their key technical terms verbatim.
+- If the latest message is already standalone, or purely conversational (a greeting, thanks, a question about the assistant itself), return it unchanged rather than inventing a topic.
+- Keep it short: a phrase or a single sentence.
 
-Respond as JSON: {"query": "<the rewritten query>"}`
-
-interface RewriteResponse {
-  query?: unknown
-}
+Your reply is used verbatim as the search query, so output only the query text: no preamble, no quotes, no explanation.`
 
 /**
  * Rewrite the current user message into a standalone query using the prior
  * conversation turns. Returns the original message when:
  *   - history is empty (first turn — nothing to resolve against),
- *   - the Mistral call fails (network, parse, schema),
+ *   - the Claude call fails,
  *   - the model produces an empty / suspiciously long output.
  */
 export async function rewriteQuery(
-  history: MistralMessage[],
+  history: ChatMessage[],
   current: string,
   userId?: number,
 ): Promise<string> {
@@ -91,19 +80,16 @@ export async function rewriteQuery(
     + `Rewrite the latest message as a standalone retrieval query.`
 
   try {
-    const { content } = await mistralChat({
+    const { content } = await claudeChat({
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: userPrompt },
       ],
-      jsonMode: true,
-      temperature: 0,
-      model: FAST_MODEL,
       userId,
       operation: 'rewrite',
     })
-    const parsed = JSON.parse(content) as RewriteResponse
-    const out = typeof parsed.query === 'string' ? parsed.query.trim() : ''
+    // Tolerate a stray pair of wrapping quotes around the query.
+    const out = content.trim().replace(/^["'«“]\s*|\s*["'»”]$/g, '').trim()
     if (out.length === 0) {
       rewriterBreaker.recordSuccess()
       return current

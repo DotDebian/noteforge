@@ -625,7 +625,7 @@ function buildServer(user: User, dek: Buffer | null, tokenId: number | null): Mc
     {
       title: 'Semantic search',
       description:
-        'Semantic + keyword search across the user\'s notes. Hybrid retrieval: Mistral embedding cosine '
+        'Semantic + keyword search across the user\'s notes. Hybrid retrieval: embedding cosine '
         + '+ FTS5 BM25, fused (RRF) and LLM-reranked; returns up to 6 hits (max 2 per document) with '
         + '`docId`, `title`, `workspaceId`, `workspaceName`, the chunk `snippet`, the best-matching '
         + '`highlight` sentence and a relevance `score`. Omit `workspaceId` to search ALL workspaces in '

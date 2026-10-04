@@ -210,7 +210,7 @@ export const docAnalyses = sqliteTable('doc_analyses', {
   /**
    * Last error message produced by the background `embedDocument` step. Null
    * when the most-recent embed run succeeded (or hasn't run yet). Surfaced
-   * by the Insights panel so silent failures (Mistral 429, network drops,
+   * by the Insights panel so silent failures (provider 429, network drops,
    * etc.) don't leave the doc invisible to chat + related-notes.
    */
   embedError: text('embed_error'),
@@ -219,7 +219,7 @@ export const docAnalyses = sqliteTable('doc_analyses', {
    * Doc-level "what is this about" vector, used by /api/ai/related to score
    * doc-to-doc similarity without averaging chunk embeddings (which dilutes
    * the signal). Built from title + summary + tags and embedded via
-   * `mistralEmbed`. Float32 little-endian buffer, 1024 dims.
+   * `embedTexts`. Float32 little-endian buffer, 1024 dims.
    *
    * Null when analysis predates this column (backfilled lazily on the next
    * re-analyze) or when the summary-embed call failed.

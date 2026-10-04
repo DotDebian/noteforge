@@ -1,5 +1,5 @@
 /**
- * Chunk a document's markdown, embed the chunks via Mistral, replace any
+ * Chunk a document's markdown, embed the chunks via Voyage, replace any
  * previously-stored chunks for that doc. Shared between the analyze endpoint
  * (which kicks it off in the background after analysis) and the explicit
  * /api/ai/embed/[docId] endpoint.
@@ -19,13 +19,10 @@ import { docChunks } from '~/server/database/schema'
 import { stripEmbeddedDataUrls } from '~/utils/excalidraw-scene'
 import { chunkMarkdown } from './chunking'
 import { encryptChunkText } from './encrypted-entities'
-import { mistralEmbed } from './mistral'
+import { EMBED_DIM, embedTextsSoft } from './embeddings'
 import { floatsToBuffer, serializeEmbedding } from './vector'
 
 const BATCH = 32
-
-/** Mistral `mistral-embed` always returns 1024-dim vectors. */
-export const EMBED_DIM = 1024
 
 /**
  * Chunks stored on `doc_chunks.text` are encrypted at rest when a DEK is
@@ -55,7 +52,7 @@ export async function embedDocument(
 ): Promise<number> {
   const db = useDb()
   // Drawings (and legacy in-note whiteboards) carry a PNG data URL in their
-  // markdown. Embedding base64 wastes a Mistral call on noise and floods the
+  // markdown. Embedding base64 wastes an embedding call on noise and floods the
   // FTS5 mirror with meaningless tokens that then win BM25 matches — strip the
   // payloads and keep only what a human could read.
   const chunks = chunkMarkdown(stripEmbeddedDataUrls(markdown))
@@ -84,14 +81,17 @@ export async function embedDocument(
   if (chunks.length === 0) return 0
 
   /* ----- 3. Embed -------------------------------------------------------- */
+  // Failure-soft: without vectors the chunks are still written and mirrored
+  // to FTS5, so the note stays findable by keyword. The old chunks are
+  // already gone at this point — throwing here would leave it unindexed.
   const chunkTexts = chunks.map(c => c.text)
   const embeddings: number[][] = []
   for (let i = 0; i < chunkTexts.length; i += BATCH) {
-    const vecs = await mistralEmbed(chunkTexts.slice(i, i + BATCH), { userId, operation: 'embed' })
+    const vecs = await embedTextsSoft(chunkTexts.slice(i, i + BATCH), { inputType: 'document', userId, operation: 'embed' })
     for (const v of vecs) embeddings.push(v)
   }
 
-  // Sanity check on the first vector: if Mistral silently changes embedding
+  // Sanity check on the first vector: if the provider silently changes embedding
   // model dim we'd be writing rows of the wrong size and vec0 MATCH would
   // explode at query time. Fail loudly here instead.
   const firstVec = embeddings[0]
@@ -153,8 +153,8 @@ function writeChunksAtomic(rows: ChunkInsertRow[]): void {
   )
 
   // vec0's `embedding float[1024]` rejects buffers that aren't exactly that
-  // many bytes — happens when Mistral occasionally returns fewer items than
-  // requested and `mistralEmbed`'s backstop fills the slot with []. Skip
+  // many bytes — happens when embeddings are unavailable (`embedTextsSoft` returns
+  // []) or the API returns fewer items than requested. Skip
   // those rows from the vec table; JS-cosine fallback still works because
   // `embedding_blob` will be empty and `loadEmbedding` returns [].
   const expectedVecBytes = EMBED_DIM * 4

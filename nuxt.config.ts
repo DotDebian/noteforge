@@ -16,9 +16,16 @@ export default defineNuxtConfig({
   },
   css: ['~/assets/css/main.css'],
   runtimeConfig: {
+    // Generation runs on Claude through the Agent SDK. Its credential
+    // (CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY) is read from the process
+    // environment by the SDK's subprocess, not from runtime config.
+    claudeModel: process.env.CLAUDE_MODEL ?? 'claude-sonnet-5-5',
+    claudeEffort: process.env.CLAUDE_EFFORT ?? 'medium',
+    // Embeddings run on Voyage (Claude has no embeddings endpoint).
+    voyageApiKey: process.env.VOYAGE_API_KEY ?? '',
+    voyageEmbedModel: process.env.VOYAGE_EMBED_MODEL ?? 'voyage-4-large',
+    // Mistral only keeps OCR + voice transcription. Optional.
     mistralApiKey: process.env.MISTRAL_API_KEY ?? '',
-    mistralChatModel: process.env.MISTRAL_CHAT_MODEL ?? 'mistral-medium-latest',
-    mistralEmbedModel: process.env.MISTRAL_EMBED_MODEL ?? 'mistral-embed',
     tavilyApiKey: process.env.TAVILY_API_KEY ?? '',
     databaseUrl: process.env.DATABASE_URL ?? 'data/noteforge.db',
     inviteCode: process.env.INVITE_CODE ?? 'NLJELA',

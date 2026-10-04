@@ -2,7 +2,7 @@
  * Admin audit log helper.
  *
  * Fire-and-forget — never throws, never blocks the request. Mirrors the
- * pattern from `logMistralUsage` in `mistral.ts`.
+ * pattern from `logAiUsage` in `ai-usage.ts`.
  */
 import { useDb } from '~/server/database/client'
 import { adminAuditLog } from '~/server/database/schema'

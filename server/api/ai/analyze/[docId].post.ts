@@ -6,7 +6,7 @@ import { requireUser } from '~/server/utils/require-user'
 import { getWorkspaceKeyFromWorkspace } from '~/server/utils/workspace-key'
 
 /**
- * Mistral JSON-mode analysis: summary + tags + questions + action items, then
+ * Claude structured-output analysis: summary + tags + questions + action items, then
  * fire-and-forget re-embed of the doc's chunks + summary vector. Shared logic
  * lives in `server/utils/notes.ts` so the MCP `analyze_document` tool runs
  * exactly the same flow.

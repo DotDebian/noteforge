@@ -20,7 +20,7 @@
  * interleave it with query rewriting + history-aware re-embedding.
  *
  * Tunables:
- *   - MIN_SCORE       = 0.45  cosine threshold (vec-only path)
+ *   - MIN_SCORE       = 0.3   cosine threshold (vec-only path)
  *   - TOP_K           = 6     final results returned
  *   - PER_DOC         = 2     max hits per source document
  *   - FIRST_STAGE_K   = 30    per-modality oversampling before fusion
@@ -30,7 +30,7 @@
 import { and, eq, inArray } from 'drizzle-orm'
 import { getRawDb, isVecAvailable, useDb } from '~/server/database/client'
 import { docChunks } from '~/server/database/schema'
-import { mistralEmbed } from './mistral'
+import { embedTextsSoft } from './embeddings'
 import { bestSentence } from './best-sentence'
 import { decryptChunkText } from './encrypted-entities'
 import { cosineSimilarity, floatsToBuffer, loadEmbedding } from './vector'
@@ -47,7 +47,12 @@ import { rerankChunks } from './rerank'
 
 export const SEARCH_TOP_K = 6
 export const SEARCH_PER_DOC_CAP = 2
-export const SEARCH_MIN_SCORE = 0.45
+/**
+ * Query-to-chunk cosine floor for the cosine-only path. Measured on
+ * `voyage-4-large`: a chunk that answers the query scores 0.45-0.62, an
+ * unrelated one stays under 0.2.
+ */
+export const SEARCH_MIN_SCORE = 0.3
 export const SEARCH_SNIPPET_MAX = 1500
 const FIRST_STAGE_K = 30
 const RRF_K = 60
@@ -369,9 +374,16 @@ export async function rankChunks(
   const topK = options.topK ?? SEARCH_TOP_K
   const queryText = (options.queryText ?? '').trim()
 
+  // No query vector (embeddings unavailable): BM25 alone, or nothing if the
+  // caller gave no query text either.
+  if (queryVec.length === 0) {
+    if (queryText.length === 0) return []
+    const ftsHits = await retrieveViaFts(candidateDocIds, queryText, { limit: FIRST_STAGE_K }, dek)
+    return applyPerDocCap(ftsHits, perDocCap, topK)
+  }
+
   // Branch 1: cosine-only (legacy callers without raw query text).
-  if (queryText.length === 0 || queryVec.length === 0) {
-    if (queryVec.length === 0) return []
+  if (queryText.length === 0) {
     const scored = isVecAvailable()
       ? await retrieveViaVec0(candidateDocIds, queryVec, {}, dek)
       : await retrieveViaJsCosine(candidateDocIds, queryVec, {}, dek)
@@ -447,8 +459,8 @@ export async function searchChunkGroups(
   const trimmed = query.trim()
   if (trimmed.length === 0) return []
 
-  const [queryVec] = await mistralEmbed([trimmed])
-  if (!queryVec || queryVec.length === 0) return []
+  // An empty vector (embeddings unavailable) makes `rankChunks` go BM25-only.
+  const [queryVec = []] = await embedTextsSoft([trimmed], { inputType: 'query', operation: 'embed_query' })
 
   // Oversample first stage so the reranker has room to work. The pool is
   // global — each group contributes up to RERANK_POOL candidates and the

@@ -7,12 +7,22 @@ services:
     ports:
       - "127.0.0.1:3030:3000"
     environment:
-      # Required — fail fast if either is missing (Nuxt/auth-utils throws on
-      # an empty NUXT_SESSION_PASSWORD; Mistral calls 401 without the key).
-      MISTRAL_API_KEY: ${MISTRAL_API_KEY:?MISTRAL_API_KEY is required}
+      # Required — fail fast if missing (Nuxt/auth-utils throws on an empty
+      # NUXT_SESSION_PASSWORD).
       NUXT_SESSION_PASSWORD: ${NUXT_SESSION_PASSWORD:?NUXT_SESSION_PASSWORD is required (>= 32 chars)}
-      MISTRAL_CHAT_MODEL: ${MISTRAL_CHAT_MODEL:-mistral-medium-latest}
-      MISTRAL_EMBED_MODEL: ${MISTRAL_EMBED_MODEL:-mistral-embed}
+      # Voyage AI embeddings. Without a working key, search and chat retrieval
+      # fall back to keyword matching (BM25).
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+      VOYAGE_EMBED_MODEL: ${VOYAGE_EMBED_MODEL:-voyage-4-large}
+      # Optional — OCR import and voice transcription only.
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      # Claude Agent SDK credential — the token from `claude setup-token`
+      # (sk-ant-oat01-…), or an API key instead. One of the two must be set
+      # or every chat / analysis call fails with an auth error.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-5-5}
+      CLAUDE_EFFORT: ${CLAUDE_EFFORT:-medium}
       # Optional — powers the chat's `web_search` tool. Left empty disables web
       # search gracefully (the tool isn't offered, chat still answers from notes).
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}

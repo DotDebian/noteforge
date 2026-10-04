@@ -7,6 +7,10 @@ import { requireAdmin } from '~/server/utils/require-admin'
 /* -------------------------------------------------------------------------- */
 
 const USD_PER_M_BY_MODEL: Record<string, number> = {
+  // Blended input/output rate — this table prices total tokens.
+  'claude-sonnet-5-5': 3,
+  // Covered by Voyage's free token allowance.
+  'voyage-4-large': 0,
   'mistral-embed': 0.10,
   'mistral-small-latest': 0.20,
   'mistral-large-latest': 2,

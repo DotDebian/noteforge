@@ -16,6 +16,7 @@ import {
   decryptWorkspace,
 } from '~/server/utils/encrypted-entities'
 import { getDek } from '~/server/utils/dek'
+import { getEmbedModel } from '~/server/utils/embeddings'
 import {
   DISPLAY_CEIL,
   DISPLAY_FLOOR,
@@ -396,7 +397,7 @@ export default defineEventHandler(async (event) => {
       userId: user.id,
       runtime: {
         vecAvailable: isVecAvailable(),
-        embedModel: 'mistral-embed',
+        embedModel: getEmbedModel(),
         embedDim: 1024,
         summaryEmbeddingComposition: 'title + summaryShort + summaryLong + tags.join(", ") joined by \\n\\n',
       },

@@ -427,7 +427,7 @@ async function saveQuotas() {
 
       <!-- AI Usage -->
       <section v-if="data.aiUsage.length > 0" class="section">
-        <h2 class="section-title">Consommation Mistral</h2>
+        <h2 class="section-title">Consommation IA</h2>
         <table class="data-table">
           <thead>
             <tr>

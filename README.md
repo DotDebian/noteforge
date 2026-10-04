@@ -1,6 +1,6 @@
 # NoteForge
 
-Notes intelligentes : workspaces → dossiers récursifs → documents markdown WYSIWYG, avec analyse IA et chat RAG via Mistral.
+Notes intelligentes : workspaces → dossiers récursifs → documents markdown WYSIWYG, avec analyse IA et chat RAG via Claude (embeddings Voyage).
 
 ## Stack
 - Nuxt 3 + Nitro (fullstack)
@@ -8,13 +8,15 @@ Notes intelligentes : workspaces → dossiers récursifs → documents markdown 
 - Tiptap (WYSIWYG markdown)
 - Tailwind CSS
 - `nuxt-auth-utils` (login/password, sessions cookie, bcrypt)
-- Mistral API (fetch natif, pas de SDK)
+- Claude via le Claude Agent SDK (chat, analyse, réécriture, rerank) — Sonnet 5.5, effort medium
+- Voyage AI (`voyage-4-large`) pour les embeddings
+- Mistral API (fetch natif, pas de SDK) pour l'OCR et la dictée — optionnel
 - pnpm, TypeScript strict
 
 ## Démarrage rapide
 ```bash
 pnpm install                     # accepte les build scripts (better-sqlite3 a un binding natif)
-cp .env.example .env             # mets ta clé MISTRAL_API_KEY + un NUXT_SESSION_PASSWORD ≥ 32 chars
+cp .env.example .env             # CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`) + NUXT_SESSION_PASSWORD ≥ 32 chars
 pnpm db:migrate                  # applique les migrations sur SQLite (data/noteforge.db)
 pnpm dev                         # http://localhost:3000
 ```
@@ -27,7 +29,7 @@ Au premier lancement, crée un compte via `/register`. Une workspace par défaut
 - **Auth** : `/register` → une workspace est créée, tu es redirigé vers `/w/1`.
 - **Sidebar** : crée des dossiers et documents via le `+` à côté de "Outline". L'arbre est récursif et collapsible.
 - **Éditeur** : tape `/` pour la slash menu, sélectionne du texte pour la bubble menu. Markdown shortcuts natifs (`# `, `- `, `[ ]`, ```` ``` ```` …). L'auto-save fire toutes les 500ms.
-- **IA** : ouvre un doc, écris du contenu, puis clique **"Analyze with Mistral"** dans la rail de droite. Le résumé, les tags, les questions et les action items apparaissent. Les embeddings sont calculés en arrière-plan (suggestions de docs liés visibles après ~1.5s).
+- **IA** : ouvre un doc, écris du contenu, puis clique **"Analyze with Claude"** dans la rail de droite. Le résumé, les tags, les questions et les action items apparaissent. Les embeddings sont calculés en arrière-plan (suggestions de docs liés visibles après ~1.5s).
 - **Chat RAG** : bouton flottant en bas à droite ; le drawer permet de poser une question scopée au workspace (ou à un dossier). Sources citées dans chaque réponse, cliquables pour ouvrir le doc cible.
 
 ## Scripts
@@ -58,7 +60,7 @@ notes/
 │   │   ├── migrate.ts           # script de migration
 │   │   └── migrations/          # SQL générés
 │   ├── middleware/              # auth global
-│   └── utils/                   # mistral wrapper, chunking, etc.
+│   └── utils/                   # claude + mistral wrappers, chunking, etc.
 └── data/                        # fichier SQLite (volume Docker)
 ```
 
@@ -80,7 +82,7 @@ Multistage `Dockerfile` (build with native toolchain → slim runtime) and `dock
 ```bash
 git clone git@github.com:DotDebian/noteforge.git
 cd noteforge
-./setup.sh                       # prépare .env (session password généré, clé Mistral promptée) + data/
+./setup.sh                       # prépare .env (session password généré, token Claude + clé Mistral promptés) + data/
 docker compose up -d --build     # http://localhost:3000
 ```
 
@@ -89,7 +91,7 @@ docker compose up -d --build     # http://localhost:3000
 ### Manuel
 
 ```bash
-cp .env.example .env             # MISTRAL_API_KEY + NUXT_SESSION_PASSWORD (>= 32 chars)
+cp .env.example .env             # CLAUDE_CODE_OAUTH_TOKEN + NUXT_SESSION_PASSWORD (>= 32 chars)
 docker compose up -d --build     # http://localhost:3000
 docker compose logs -f noteforge
 ```
@@ -103,7 +105,7 @@ Healthcheck: `curl -fsS http://localhost:3000/api/health` every 30s; the contain
 Persistent state: the `./data` directory is bind-mounted to `/app/data`. Back up `data/noteforge.db` (plus its `-wal` / `-shm` siblings if present) to snapshot the workspace.
 
 ## IA — détail
-Un seul appel Mistral en JSON-mode par document génère :
+Un seul appel Claude (sortie structurée) par document génère :
 - `summaryShort` (1-2 phrases)
 - `summaryLong` (3-6 phrases)
 - `useCases` (3-5 cas d'usage)
@@ -111,6 +113,6 @@ Un seul appel Mistral en JSON-mode par document génère :
 - `questions` (3-5 questions auto)
 - `actionItems` (TODOs détectés)
 
-En parallèle, le doc est chunké et embeddé (`mistral-embed`) pour la recherche sémantique et le chat RAG.
+En parallèle, le doc est chunké et embeddé (`voyage-4-large`) pour la recherche sémantique et le chat RAG.
 
 Chat RAG : SSE streamé, scope par workspace ou dossier, sources citées dans chaque réponse.

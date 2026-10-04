@@ -33,7 +33,7 @@ const EDITOR_DEFAULTS: Required<Pick<EditorPrefs, 'columnWidth' | 'fontSize' | '
 }
 
 const AI_DEFAULTS: Required<Pick<AiPrefs, 'chatModel' | 'temperature' | 'disableRewriter' | 'disableReranker'>> = {
-  chatModel: 'mistral-small-latest',
+  chatModel: 'claude-sonnet-5-5',
   temperature: 0.7,
   disableRewriter: false,
   disableReranker: false,

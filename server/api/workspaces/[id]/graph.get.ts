@@ -63,11 +63,11 @@ const SIMILARITY_MAX_DOCS = 800
 /** Max semantic neighbours kept per node (asymmetric kNN, de-duped to undirected). */
 const SIMILARITY_TOP_K = 4
 /**
- * Cosine floor for a semantic edge. `mistral-embed` is anisotropic (unrelated
- * French summaries already sit ~0.73-0.76), so we floor a touch above the
- * related-panel MIN_COSINE (0.77) to keep graph edges meaningful.
+ * Cosine floor for a semantic edge: a touch above the related-panel
+ * MIN_COSINE (0.5, see `related-scoring.ts` for the calibration) to keep
+ * graph edges meaningful.
  */
-const SIMILARITY_MIN_COSINE = 0.78
+const SIMILARITY_MIN_COSINE = 0.52
 
 function undirectedKey(a: number, b: number): string {
   return a < b ? `${a}-${b}` : `${b}-${a}`

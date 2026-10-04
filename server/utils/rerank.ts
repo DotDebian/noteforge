@@ -1,29 +1,28 @@
 /**
- * Second-stage Mistral reranker.
+ * Second-stage LLM reranker.
  *
  * After the first-stage retrieval (vec0 cosine + FTS5 BM25, fused via RRF),
- * we feed the top-N candidates to a small Mistral model and ask it to score
- * each one against the query in [0, 10]. The model sees the snippets in
- * isolation — no chunk-id, no doc title, no metadata — so its judgment is
- * purely "does this snippet help answer this query".
+ * we feed the top-N candidates to Claude and ask it to score each one against
+ * the query in [0, 10]. The model sees the snippets in isolation — no
+ * chunk-id, no doc title, no metadata — so its judgment is purely "does this
+ * snippet help answer this query".
  *
- * Why a JSON-mode call rather than a bi-encoder reranker: we already depend
- * on Mistral and have no extra-process inference budget. A single
- * mistral-small JSON call (~3-8k tokens in) is cheap compared to the
- * generation we're about to do anyway.
+ * The scores come back as a JSON line in a plain single-turn reply rather
+ * than through schema-validated structured output: that path costs an extra
+ * turn, and this call sits in front of the chat's first token. A reply we
+ * can't parse is just a failure, which is soft here.
  *
  * Failure-soft: any error returns the input candidates unchanged so chat
  * never blocks on the reranker.
  */
-import { mistralChat } from './mistral'
-import { FAST_MODEL } from './query-rewrite'
+import { claudeChat } from './claude'
 import type { ScoredChunk } from './search'
 import { createCircuitBreaker } from './circuit-breaker'
 
 /**
  * Breaker for the LLM reranker call. After 3 failures within 60s the breaker
  * opens for 60s, during which `rerankChunks` short-circuits and returns the
- * first-stage pool unchanged. Protects chat latency when Mistral is degraded.
+ * first-stage pool unchanged. Protects chat latency when Claude is degraded.
  */
 const rerankerBreaker = createCircuitBreaker({ failureThreshold: 3, cooldownMs: 60_000 })
 
@@ -39,18 +38,18 @@ const RERANK_SNIPPET_MAX = 600
 const LLM_WEIGHT = 0.7
 const PRIOR_WEIGHT = 1 - LLM_WEIGHT
 
-const SYSTEM_PROMPT = `You are a precision reranker for note-search snippets.
+const SYSTEM_PROMPT = `You rerank search snippets from a user's personal notes. Your scores decide which snippets are handed to the assistant that answers the user's question, so a high score should mean "this snippet helps answer the query".
 
-For each numbered snippet, judge how relevant it is to the user's QUERY on a
-0-to-10 integer scale where:
+For each numbered snippet, judge how relevant it is to the QUERY on a 0-to-10 integer scale:
   10 = directly contains the answer
    7 = closely related and likely useful
    4 = tangentially related
    0 = unrelated
 
-Be strict — most snippets are noise. Score independently; ignore order. Reply
-as JSON: {"scores":[{"i":<int index>,"s":<int 0-10>}, ...]} with one entry per
-snippet. No prose, no commentary.`
+Be strict: most snippets are noise. Score each snippet independently of the others and of their order.
+
+Your reply is parsed by a program. Output only this JSON object, with one entry per snippet and no code fence or commentary:
+{"scores":[{"i":<snippet index>,"s":<score 0-10>}, ...]}`
 
 interface RerankResponse {
   scores?: Array<{ i?: unknown, s?: unknown }>
@@ -92,18 +91,17 @@ export async function rerankChunks(
 
   let llmScores: number[]
   try {
-    const { content } = await mistralChat({
+    const { content } = await claudeChat({
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: userPrompt },
       ],
-      jsonMode: true,
-      temperature: 0,
-      model: FAST_MODEL,
       userId,
       operation: 'rerank',
     })
-    const parsed = JSON.parse(content) as RerankResponse
+    // Parse the outermost object so a stray code fence doesn't sink the call.
+    const json = content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1)
+    const parsed = JSON.parse(json) as RerankResponse
     llmScores = parseScores(parsed, candidates.length)
     rerankerBreaker.recordSuccess()
   }

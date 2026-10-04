@@ -14,27 +14,31 @@ export const TAG_WEIGHT = 0.15
 export const LINK_BONUS = 0.1
 
 /**
- * Relevance floor on the RAW cosine (before tag/link bonuses). `mistral-embed`
- * is anisotropic: two unrelated French summaries already land at ~0.73-0.76
- * cosine, so without a floor the panel fills its TOP_K with noise (the
- * welcome doc showed up everywhere at "75%").
+ * Relevance floor on the RAW cosine (before tag/link bonuses). Without one the
+ * panel fills its TOP_K with noise whenever a workspace has few real
+ * neighbours.
  *
- * Calibrated 2026-06 on real data via the settings diagnostics dump:
- *   - unrelated pairs (welcome doc vs work notes): 0.733-0.762
- *   - genuinely related pairs: 0.777-0.901
- * 0.77 excludes every observed unrelated pair while keeping the tightest
- * real one (Timify architecture <-> Free Appointment spec at 0.7771).
+ * Recalibrated 2026-10 for `voyage-4-large`, whose cosines spread far wider
+ * than `mistral-embed`'s (which packed everything into ~0.73-0.99, hence the
+ * old 0.77). Measured on the real corpus after re-embedding, doc-to-doc
+ * max-of-chunks cosine: p5 0.45, median 0.63, p95 0.82. Pairs the old floor
+ * rejected sit at a 0.55 median, pairs it kept at 0.63. 0.5 drops the same
+ * bottom ~10% the old floor did.
+ *
+ * ⚠️ Calibrated on chunk vectors: summary vectors can't be rebuilt offline
+ * (their source text is encrypted) and refill as notes are re-analysed.
+ * Revisit with the settings diagnostics dump once they have.
  */
-export const MIN_COSINE = 0.77
+export const MIN_COSINE = 0.5
 
 /**
- * Display renormalisation window for the UI: cosines compress into
- * [~0.65, ~0.95] in practice, so the panel maps that span onto 0-100%
- * instead of showing the raw cosine (which made "unrelated" read as 75%).
- * Keep in sync with `formatScore` in `DocumentInsightsPanel.vue`.
+ * Display renormalisation window for the UI: the panel maps this span onto
+ * 0-100% instead of showing the raw cosine, so the floor reads as "weak"
+ * rather than "50%". Keep in sync with `formatScore` in
+ * `DocumentInsightsPanel.vue`.
  */
-export const DISPLAY_FLOOR = 0.65
-export const DISPLAY_CEIL = 0.95
+export const DISPLAY_FLOOR = 0.3
+export const DISPLAY_CEIL = 0.9
 
 export function jaccard(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
   if (a.size === 0 || b.size === 0) return 0

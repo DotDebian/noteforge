@@ -31,7 +31,7 @@ const KEY_LABELS: Record<RetentionKey, { title: string, desc: string }> = {
   },
   ai_usage_logs_ttl_days: {
     title: 'Logs IA',
-    desc: 'Tokens Mistral consommés — table `ai_usage_logs`.',
+    desc: 'Tokens IA consommés — table `ai_usage_logs`.',
   },
   login_attempts_ttl_days: {
     title: 'Tentatives de connexion',

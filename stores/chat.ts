@@ -174,8 +174,7 @@ interface State {
   webFallbackEnabled: boolean
   /**
    * Persisted toggle for the "deep reasoning" mode (Wave 3 / N6). When on,
-   * /api/ai/chat routes the conversation through `magistral-medium-latest`
-   * with a slightly warmer temperature default.
+   * /api/ai/chat runs the turn at a higher Claude effort level.
    */
   reasoningEnabled: boolean
   /**
@@ -900,8 +899,7 @@ export const useChatStore = defineStore('chat', {
      * Stream-send the message. Uses native `fetch` so we can read the SSE
      * body via a ReadableStream (note: `$fetch` swallows the stream).
      *
-     * `opts` allows per-turn overrides for the model (e.g. Magistral
-     * reasoning toggle), temperature (regenerate-with-options), web-search
+     * `opts` allows per-turn overrides for the model (regenerate-with-options), web-search
      * fallback, attached image (vision), and agentic tool calls. None of
      * them are required — defaults preserve the current behavior.
      */
@@ -954,7 +952,7 @@ export const useChatStore = defineStore('chat', {
       const useWebFallback = opts?.webFallback ?? this.webFallbackEnabled
       // Same pattern for the deep-reasoning toggle (Wave 3 / N6). When
       // reasoning is on AND the caller didn't pin a model, we DON'T send
-      // `model` either — let the server pick Magistral. That keeps the
+      // `model` either — the server raises the effort instead. That keeps the
       // regen-options popover (which always sends `model`) independent.
       const useReasoning = opts?.reasoning ?? this.reasoningEnabled
       const useAllowWrites = opts?.allowWrites ?? this.allowWritesEnabled
@@ -1166,7 +1164,7 @@ export const useChatStore = defineStore('chat', {
               a.status = undefined
               finishSteps(a)
               a.errored = true
-              const detail = typeof event.detail === 'string' ? event.detail : 'Mistral error'
+              const detail = typeof event.detail === 'string' ? event.detail : 'Claude error'
               a.content = a.content
                 ? `${a.content}\n\n[error: ${detail}]`
                 : `Sorry — ${detail}`

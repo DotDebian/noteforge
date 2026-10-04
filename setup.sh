@@ -48,17 +48,27 @@ if [ "$write_env" -eq 1 ]; then
   say "Génération d'un NUXT_SESSION_PASSWORD (48 octets base64)…"
   session_pwd=$(openssl rand -base64 48 | tr -d '\n')
 
-  printf "%sClé MISTRAL_API_KEY%s (laisser vide pour remplir plus tard) : " "$C_BOLD" "$C_RESET"
+  printf "%sClé VOYAGE_API_KEY%s (embeddings, laisser vide pour remplir plus tard) : " "$C_BOLD" "$C_RESET"
   # -s masque la saisie ; certains shells POSIX-only ne le supportent pas, fallback silencieux.
-  if read -rs mistral_key 2>/dev/null; then echo; else read -r mistral_key; fi
-  mistral_key=${mistral_key:-sk-replace-me}
+  if read -rs voyage_key 2>/dev/null; then echo; else read -r voyage_key; fi
+  voyage_key=${voyage_key:-pa-replace-me}
+
+  printf "%sToken CLAUDE_CODE_OAUTH_TOKEN%s (\`claude setup-token\`, laisser vide pour remplir plus tard) : " "$C_BOLD" "$C_RESET"
+  if read -rs claude_token 2>/dev/null; then echo; else read -r claude_token; fi
+  claude_token=${claude_token:-sk-ant-oat01-replace-me}
 
   umask 077
   cat > "$ENV_FILE" <<EOF
 # Généré par setup.sh le $(date -u +%Y-%m-%dT%H:%M:%SZ)
-MISTRAL_API_KEY=$mistral_key
-MISTRAL_CHAT_MODEL=mistral-medium-latest
-MISTRAL_EMBED_MODEL=mistral-embed
+CLAUDE_CODE_OAUTH_TOKEN=$claude_token
+CLAUDE_MODEL=claude-sonnet-5-5
+CLAUDE_EFFORT=medium
+
+VOYAGE_API_KEY=$voyage_key
+VOYAGE_EMBED_MODEL=voyage-4-large
+
+# Optionnel — OCR à l'import et dictée vocale uniquement.
+MISTRAL_API_KEY=
 
 NUXT_SESSION_PASSWORD=$session_pwd
 
@@ -67,8 +77,11 @@ DATABASE_URL=/app/data/noteforge.db
 EOF
   say "$ENV_FILE écrit (chmod 600)."
 
-  if [ "$mistral_key" = "sk-replace-me" ]; then
-    warn "MISTRAL_API_KEY non renseignée — édite $ENV_FILE avant de lancer le container."
+  if [ "$voyage_key" = "pa-replace-me" ]; then
+    warn "VOYAGE_API_KEY non renseignée — la recherche se limitera aux mots-clés tant qu'elle manque."
+  fi
+  if [ "$claude_token" = "sk-ant-oat01-replace-me" ]; then
+    warn "CLAUDE_CODE_OAUTH_TOKEN non renseigné — édite $ENV_FILE avant de lancer le container."
   fi
 fi
 

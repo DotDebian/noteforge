@@ -61,7 +61,8 @@ import {
 import { activeDocsWhere, activeFoldersWhere } from './active'
 import { embedDocument } from './embed-doc'
 import { extractDocLinks, reconcileDocLinks } from './doc-links'
-import { mistralChat, mistralEmbed } from './mistral'
+import { claudeChat } from './claude'
+import { embedTextsSoft } from './embeddings'
 import { floatsToBuffer } from './vector'
 import { searchChunkGroups, type SearchChunkGroup, type SearchHit } from './search'
 import { scoreTitleMatch, TITLE_MATCH_MIN_SCORE } from './title-match'
@@ -1473,47 +1474,42 @@ export async function getUserDocumentLinks(
 /*  Analyze                                                                    */
 /* ========================================================================== */
 
-const ANALYSIS_SYSTEM_PROMPT = `You are NoteForge Analyst, a careful note-summariser.
+const ANALYSIS_SYSTEM_PROMPT = `You are NoteForge Analyst. You read one of the user's notes and produce the analysis shown in the note's insights panel: summaries, tags, follow-up questions and the action items it contains. The result is also used to relate notes to each other, so it should describe what this note actually says.
 
-Always reply with ONE valid JSON object and nothing else (no markdown fences,
-no commentary). The JSON MUST match this schema exactly:
+Fields:
+- summaryShort: one sentence, at most 280 characters.
+- summaryLong: 3 to 6 sentences.
+- useCases: 3 to 5 concrete use-cases or applications of the note's content.
+- tags: 5 to 10 lowercase tags. Prefer single words; multi-word tags use kebab-case (e.g. "machine-learning"). No hashtag prefix.
+- questions: 3 to 5 thought-provoking follow-up questions.
+- actionItems: only the tasks truly present in the note (TODOs, commitments, deadlines), and an empty array when there are none. The user ticks these off, so an invented item is worse than a missing one. Set "done" to true only for items the note explicitly marks as done, such as a checked checkbox.
+- language: the BCP-47 code of the note's main language, e.g. "en", "fr", "es", "de".
 
-{
-  "summaryShort": string,         // <= 280 chars, single sentence ideally
-  "summaryLong":  string,         // 3 to 6 sentences
-  "useCases":     string[],       // 3 to 5 concrete use-cases / applications
-  "tags":         string[],       // 5 to 10 lowercase tags, prefer single words,
-                                  // multi-word tags must be kebab-case
-  "questions":    string[],       // 3 to 5 thought-provoking follow-up questions
-  "actionItems":  { "text": string, "done": boolean }[],
-                                  // ONLY include items truly present in the
-                                  // note (TODOs, action verbs, deadlines).
-                                  // Empty array if there are none. Set
-                                  // "done": true only for items explicitly
-                                  // marked done (e.g. checked checkboxes).
-  "language":     string          // BCP-47 code of the note's main language,
-                                  // e.g. "en", "fr", "es", "de"
+Detect the note's language from its content and write every text field (summaries, use-cases, tags, questions, action items) in that language. Only "language" itself is a code.`
+
+/** JSON Schema mirror of `AnalysisSchema`, enforced by Claude's structured output. */
+const ANALYSIS_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    summaryShort: { type: 'string' },
+    summaryLong: { type: 'string' },
+    useCases: { type: 'array', items: { type: 'string' } },
+    tags: { type: 'array', items: { type: 'string' } },
+    questions: { type: 'array', items: { type: 'string' } },
+    actionItems: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { text: { type: 'string' }, done: { type: 'boolean' } },
+        required: ['text', 'done'],
+        additionalProperties: false,
+      },
+    },
+    language: { type: 'string' },
+  },
+  required: ['summaryShort', 'summaryLong', 'useCases', 'tags', 'questions', 'actionItems', 'language'],
+  additionalProperties: false,
 }
-
-Rules:
-- Detect the document's language from its content and write every string
-  field (summaries, use-cases, tags, questions, actionItems.text) in THAT
-  language. Only "language" itself is the BCP-47 code.
-- Do NOT invent action items that aren't supported by the text.
-- Tags must be lowercase. Multi-word tags use kebab-case (e.g.
-  "machine-learning"). Avoid hashtag prefixes.
-- Output strictly valid JSON. Do not wrap in \`\`\`json.
-
-Example shape (illustrative values, do not echo):
-{
-  "summaryShort": "Notes from the kickoff meeting outlining v1 scope.",
-  "summaryLong": "The team agreed on a minimal v1 focused on...",
-  "useCases": ["Onboarding new engineers", "Quarterly planning input"],
-  "tags": ["meeting", "kickoff", "v1", "scope", "engineering"],
-  "questions": ["What's the blast-radius of slipping the date?"],
-  "actionItems": [{ "text": "Ship login flow by Friday", "done": false }],
-  "language": "en"
-}`
 
 const ActionItem = z.object({
   text: z.string().trim().min(1).max(500),
@@ -1574,7 +1570,7 @@ async function embedDocSummary(
   const text = parts.join('\n\n').trim()
   if (text.length === 0) return
 
-  const [vec] = await mistralEmbed([text], { userId, operation: 'embed_summary' })
+  const [vec] = await embedTextsSoft([text], { inputType: 'document', userId, operation: 'embed_summary' })
   if (!vec || vec.length === 0) return
 
   // The summary embedding vector itself is intentionally NOT encrypted —
@@ -1586,7 +1582,7 @@ async function embedDocSummary(
 }
 
 /**
- * Run a full analysis on a document: Mistral JSON-mode call → upsert
+ * Run a full analysis on a document: Claude structured-output call → upsert
  * `doc_analyses` → kick off chunk re-embedding + summary embedding in the
  * background. Same flow as `ai/analyze/[docId].post.ts`.
  *
@@ -1616,35 +1612,22 @@ export async function analyzeUserDocument(
   }
 
   const userPrompt = `Title: ${doc.title}\n\n---\n\n${md}`
-  const { content } = await mistralChat({
+  const { structured: parsed } = await claudeChat({
     messages: [
       { role: 'system', content: ANALYSIS_SYSTEM_PROMPT },
       { role: 'user', content: userPrompt },
     ],
-    jsonMode: true,
-    temperature: 0.2,
+    jsonSchema: ANALYSIS_JSON_SCHEMA,
     userId,
     operation: 'analyze',
   })
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(content)
-  }
-  catch (err) {
-    throw createError({
-      statusCode: 502,
-      statusMessage: 'mistral_failed',
-      data: { error: 'mistral_failed', detail: `Invalid JSON from Mistral: ${(err as Error).message}` },
-    })
-  }
 
   const checked = AnalysisSchema.safeParse(parsed)
   if (!checked.success) {
     throw createError({
       statusCode: 502,
-      statusMessage: 'mistral_failed',
-      data: { error: 'mistral_failed', detail: `Schema mismatch: ${checked.error.message}` },
+      statusMessage: 'claude_failed',
+      data: { error: 'claude_failed', detail: `Schema mismatch: ${checked.error.message}` },
     })
   }
   const analysis = normaliseAnalysis(checked.data)

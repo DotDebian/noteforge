@@ -70,6 +70,18 @@ COPY --from=build /app/docker ./docker
 RUN chmod +x /app/docker/entrypoint.sh \
     && mkdir -p /app/data
 
+# The Claude Agent SDK drives a native `claude` binary shipped in a per-platform
+# optional package, which it locates with a dynamic resolve Nitro's trace can't
+# follow (same story as sqlite-vec above). Rather than duplicate ~250 MB into
+# .output, expose the copy already in node_modules at a stable path and hand it
+# to the SDK through CLAUDE_CODE_EXECUTABLE (read in server/utils/claude.ts).
+# `set -eux` + `test -x` fail the build if the package is missing.
+RUN set -eux; \
+    BIN="$(ls /app/node_modules/.pnpm/@anthropic-ai+claude-agent-sdk-linux-x64@*/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude)"; \
+    test -x "$BIN"; \
+    ln -s "$BIN" /usr/local/bin/claude-agent
+ENV CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude-agent
+
 VOLUME ["/app/data"]
 EXPOSE 3000
 

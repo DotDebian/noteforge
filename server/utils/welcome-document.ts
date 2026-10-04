@@ -36,7 +36,7 @@ Sélectionne du texte pour faire apparaître la **bubble menu** (gras, italique,
 
 - [x] Créer ton premier workspace
 - [ ] Écrire un document
-- [ ] Lancer une analyse Mistral
+- [ ] Lancer une analyse Claude
 - [ ] Poser une question dans le chat RAG
 
 ### Tableaux
@@ -58,7 +58,7 @@ function hello(name: string): string {
 
 \`\`\`mermaid
 graph TD
-  A[Note brute] --> B[Analyse Mistral]
+  A[Note brute] --> B[Analyse Claude]
   B --> C[Tags + résumé]
   B --> D[Embeddings]
   D --> E[Chat RAG]
@@ -99,11 +99,11 @@ Tu peux ajouter des notes de bas de page[^bienvenue] qui s'accumulent automatiqu
 
 ## Fonctionnalités IA
 
-NoteForge utilise **Mistral** pour deux choses principales.
+NoteForge utilise **Claude** (analyse, chat) et **Voyage** (embeddings) pour deux choses principales.
 
 ### 1. Analyse de document
 
-Clique sur **"Analyze with Mistral"** dans le panneau d'insights à droite. Un seul appel JSON produit :
+Clique sur **"Analyze with Claude"** dans le panneau d'insights à droite. Un seul appel JSON produit :
 
 - un résumé court (~1 phrase) et un résumé long (3–6 phrases)
 - 3 à 5 cas d'usage
@@ -111,7 +111,7 @@ Clique sur **"Analyze with Mistral"** dans le panneau d'insights à droite. Un s
 - 3 à 5 questions auto pour creuser le sujet
 - les action items détectés dans le texte
 
-En parallèle, le document est chunké et embeddé (Mistral Embed) pour la recherche sémantique et le chat.
+En parallèle, le document est chunké et embeddé (Voyage) pour la recherche sémantique et le chat.
 
 ### 2. Chat RAG
 
