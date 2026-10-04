@@ -10,7 +10,7 @@ Notes intelligentes : workspaces → dossiers récursifs → documents markdown 
 - `nuxt-auth-utils` (login/password, sessions cookie, bcrypt)
 - Claude via le Claude Agent SDK (chat, analyse, réécriture, rerank) — Sonnet 5.5, effort medium
 - Voyage AI (`voyage-4-large`) pour les embeddings
-- Mistral API (fetch natif, pas de SDK) pour l'OCR et la dictée — optionnel
+- Mistral API pour la dictée vocale uniquement — optionnel
 - pnpm, TypeScript strict
 
 ## Démarrage rapide

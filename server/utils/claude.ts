@@ -36,12 +36,14 @@ export type ClaudeImageMime = typeof CLAUDE_IMAGE_MIMES[number]
 export type ChatContentPart =
   | { type: 'text', text: string }
   | { type: 'image', mediaType: ClaudeImageMime, data: string }
+  /** A PDF, base64-encoded. Claude reads both its text layer and its pages as images. */
+  | { type: 'pdf', data: string }
 
 export interface ChatMessage {
   role: ChatRole
   /**
    * Most messages are plain strings. A user message with an attached image
-   * uses the array form (text + base64 image).
+   * or PDF uses the array form (text + base64 attachment).
    */
   content: string | ChatContentPart[]
 }
@@ -55,6 +57,8 @@ export interface ClaudeChatOptions {
   jsonSchema?: Record<string, unknown>
   model?: string
   effort?: EffortLevel
+  /** Raise the reply's token ceiling for long outputs (e.g. a transcription). */
+  maxOutputTokens?: number
   userId?: number
   operation?: string
 }
@@ -108,12 +112,12 @@ function toPrompt(messages: ChatMessage[]): { system: string, prompt: string | A
   }
   const system = systemParts.join('\n\n')
 
-  const images = typeof current.content === 'string'
+  const attachments = typeof current.content === 'string'
     ? []
-    : current.content.filter((p): p is Extract<ChatContentPart, { type: 'image' }> => p.type === 'image')
-  if (images.length === 0) return { system, prompt: text }
+    : current.content.filter((p): p is Exclude<ChatContentPart, { type: 'text' }> => p.type !== 'text')
+  if (attachments.length === 0) return { system, prompt: text }
 
-  // Images only travel through the streaming-input form of `prompt`.
+  // Attachments only travel through the streaming-input form of `prompt`.
   async function* single(): AsyncGenerator<SDKUserMessage> {
     yield {
       type: 'user',
@@ -121,10 +125,15 @@ function toPrompt(messages: ChatMessage[]): { system: string, prompt: string | A
       message: {
         role: 'user',
         content: [
-          ...images.map(img => ({
-            type: 'image' as const,
-            source: { type: 'base64' as const, media_type: img.mediaType, data: img.data },
-          })),
+          ...attachments.map(a => a.type === 'image'
+            ? {
+                type: 'image' as const,
+                source: { type: 'base64' as const, media_type: a.mediaType, data: a.data },
+              }
+            : {
+                type: 'document' as const,
+                source: { type: 'base64' as const, media_type: 'application/pdf' as const, data: a.data },
+              }),
           { type: 'text' as const, text },
         ],
       },
@@ -135,7 +144,7 @@ function toPrompt(messages: ChatMessage[]): { system: string, prompt: string | A
 
 type RunEvent =
   | { kind: 'text', text: string }
-  | { kind: 'final', content: string, structured?: unknown }
+  | { kind: 'final', content: string, structured?: unknown, truncated: boolean }
 
 function fail(detail: string): never {
   throw createError({
@@ -166,7 +175,11 @@ async function* run(opts: ClaudeChatOptions, stream: boolean): AsyncGenerator<Ru
     // model reach for them. Either switch below is enough; both are set.
     strictMcpConfig: true,
     mcpServers: {},
-    env: { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: 'false' },
+    env: {
+      ...process.env,
+      ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
+      ...(opts.maxOutputTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(opts.maxOutputTokens) } : {}),
+    },
     cwd: tmpdir(),
     // Structured output is delivered through an internal tool call, so it
     // needs more than one turn.
@@ -214,7 +227,12 @@ async function* run(opts: ClaudeChatOptions, stream: boolean): AsyncGenerator<Ru
       const promptTokens = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
       logAiUsage(opts.userId, model, operation,
         promptTokens, u.output_tokens, promptTokens + u.output_tokens, true, Date.now() - start)
-      yield { kind: 'final', content, ...(opts.jsonSchema ? { structured } : {}) }
+      yield {
+        kind: 'final',
+        content,
+        truncated: msg.stop_reason === 'max_tokens',
+        ...(opts.jsonSchema ? { structured } : {}),
+      }
       return
     }
   }
@@ -229,10 +247,15 @@ async function* run(opts: ClaudeChatOptions, stream: boolean): AsyncGenerator<Ru
   fail('Claude ended without a result')
 }
 
-/** One-shot generation. With `jsonSchema`, `structured` holds the validated object. */
-export async function claudeChat(opts: ClaudeChatOptions): Promise<{ content: string, structured?: unknown }> {
+/**
+ * One-shot generation. With `jsonSchema`, `structured` holds the validated
+ * object. `truncated` is true when the reply hit the output-token ceiling.
+ */
+export async function claudeChat(
+  opts: ClaudeChatOptions,
+): Promise<{ content: string, structured?: unknown, truncated: boolean }> {
   for await (const ev of run(opts, false)) {
-    if (ev.kind === 'final') return { content: ev.content, structured: ev.structured }
+    if (ev.kind === 'final') return { content: ev.content, structured: ev.structured, truncated: ev.truncated }
   }
   return fail('Claude ended without a result')
 }

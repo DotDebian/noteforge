@@ -22,6 +22,10 @@ data/*.db-journal
 data/*.db-wal
 data/*.db-shm
 data/uploads/
+# Written by docker/reembed.mjs: a full pre-run copy of the database, and its
+# progress marker.
+data/*.db.pre-reembed-*
+data/.reembed-*.json
 
 # logs
 *.log

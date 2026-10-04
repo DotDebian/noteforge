@@ -3,8 +3,8 @@
  *
  * Reports:
  *  - db: "ok" if a trivial `SELECT 1` works against SQLite, else "down".
- *  - claude / voyage / mistral: "ok" if a call to that provider succeeded
- *    within the last 5 minutes (see `server/utils/provider-health.ts`); never
+ *  - claude / voyage: "ok" if a call to that provider succeeded within the
+ *    last 5 minutes (see `server/utils/provider-health.ts`); never
  *    makes a real API call.
  *  - uptimeMs: process uptime in milliseconds.
  *  - status: "ok" iff db === "ok", else "degraded".
@@ -19,7 +19,6 @@ interface HealthResponse {
   db: 'ok' | 'down'
   claude: 'ok' | 'unknown'
   voyage: 'ok' | 'unknown'
-  mistral: 'ok' | 'unknown'
   uptimeMs: number
 }
 
@@ -34,9 +33,8 @@ export default defineEventHandler((): HealthResponse => {
 
   const claude = getProviderStatus('claude')
   const voyage = getProviderStatus('voyage')
-  const mistral = getProviderStatus('mistral')
   const uptimeMs = Math.round(process.uptime() * 1000)
   const status: 'ok' | 'degraded' = db === 'ok' ? 'ok' : 'degraded'
 
-  return { status, db, claude, voyage, mistral, uptimeMs }
+  return { status, db, claude, voyage, uptimeMs }
 })

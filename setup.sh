@@ -67,7 +67,7 @@ CLAUDE_EFFORT=medium
 VOYAGE_API_KEY=$voyage_key
 VOYAGE_EMBED_MODEL=voyage-4-large
 
-# Optionnel — OCR à l'import et dictée vocale uniquement.
+# Optionnel — dictée vocale uniquement.
 MISTRAL_API_KEY=
 
 NUXT_SESSION_PASSWORD=$session_pwd

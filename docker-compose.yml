@@ -14,7 +14,7 @@ services:
       # fall back to keyword matching (BM25).
       VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
       VOYAGE_EMBED_MODEL: ${VOYAGE_EMBED_MODEL:-voyage-4-large}
-      # Optional — OCR import and voice transcription only.
+      # Optional — voice dictation (realtime transcription) only.
       MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
       # Claude Agent SDK credential — the token from `claude setup-token`
       # (sk-ant-oat01-…), or an API key instead. One of the two must be set

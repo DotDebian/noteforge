@@ -24,7 +24,7 @@ export default defineNuxtConfig({
     // Embeddings run on Voyage (Claude has no embeddings endpoint).
     voyageApiKey: process.env.VOYAGE_API_KEY ?? '',
     voyageEmbedModel: process.env.VOYAGE_EMBED_MODEL ?? 'voyage-4-large',
-    // Mistral only keeps OCR + voice transcription. Optional.
+    // Mistral only keeps realtime voice transcription. Optional.
     mistralApiKey: process.env.MISTRAL_API_KEY ?? '',
     tavilyApiKey: process.env.TAVILY_API_KEY ?? '',
     databaseUrl: process.env.DATABASE_URL ?? 'data/noteforge.db',

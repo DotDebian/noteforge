@@ -7,11 +7,8 @@ import { assertFolderAccess, assertWorkspaceAccess } from '~/server/utils/access
 import { activeDocsWhere } from '~/server/utils/active'
 import { decryptField, encryptField } from '~/server/utils/crypto'
 import { getDek } from '~/server/utils/dek'
-import {
-  mistralFileSignedUrl,
-  mistralOcr,
-  mistralUploadFile,
-} from '~/server/utils/mistral'
+import { ocrToMarkdown, OCR_NO_TEXT } from '~/server/utils/ocr'
+import { requireUser } from '~/server/utils/require-user'
 
 const MAX_FILES = 20
 const MAX_BYTES_PER_FILE = 50 * 1024 * 1024 // 50 MB
@@ -19,15 +16,6 @@ const MAX_TOTAL_BYTES = 100 * 1024 * 1024 // 100 MB
 
 const ALLOWED_MIMES = new Set<string>([
   'application/pdf',
-  'image/png',
-  'image/jpeg',
-  'image/jpg',
-  'image/webp',
-  'image/avif',
-  'image/gif',
-])
-
-const IMAGE_MIMES = new Set<string>([
   'image/png',
   'image/jpeg',
   'image/jpg',
@@ -49,6 +37,7 @@ const Body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
+  const user = await requireUser(event)
   const input = await readValidatedBody(event, Body.parse)
   await assertWorkspaceAccess(event, input.workspaceId)
   const dek = await getDek(event)
@@ -157,28 +146,18 @@ export default defineEventHandler(async (event) => {
       continue
     }
 
-    let signedUrl: string
-    try {
-      const fileId = await mistralUploadFile(file.name, bytes, mime)
-      signedUrl = await mistralFileSignedUrl(fileId, 1)
-    }
-    catch (err) {
-      skipped.push({ name: file.name, reason: (err as Error).message || 'upload failed' })
-      continue
-    }
-
     let markdown = ''
     try {
-      const out = await mistralOcr(signedUrl, IMAGE_MIMES.has(mime) ? 'image' : 'document')
-      markdown = out.markdown
+      markdown = await ocrToMarkdown(bytes, mime, { userId: user.id })
     }
     catch (err) {
-      skipped.push({ name: file.name, reason: (err as Error).message || 'OCR failed' })
+      const detail = (err as { data?: { detail?: string } }).data?.detail
+      skipped.push({ name: file.name, reason: detail || (err as Error).message || 'OCR failed' })
       continue
     }
 
     if (!markdown.trim()) {
-      markdown = '*(no text extracted)*'
+      markdown = OCR_NO_TEXT
     }
 
     const baseTitle = deriveTitle(markdown, file.name)

@@ -3,12 +3,12 @@
  * report a lightweight liveness signal without making real API calls itself.
  *
  * `recordProviderSuccess()` is invoked from the provider wrappers
- * (`claude.ts`, `embeddings.ts`, `mistral.ts`) after each successful call.
+ * (`claude.ts`, `embeddings.ts`) after each successful call.
  * `getProviderStatus()` returns `"ok"` if any success was recorded within the
  * last 5 minutes, else `"unknown"`.
  */
 
-export type AiProvider = 'claude' | 'voyage' | 'mistral'
+export type AiProvider = 'claude' | 'voyage'
 
 const FRESH_WINDOW_MS = 5 * 60 * 1000
 

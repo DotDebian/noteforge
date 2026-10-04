@@ -408,7 +408,7 @@ const en: Messages = {
   'import.completePeriod': '.',
   'import.completeNoDocs': 'No documents were created',
   'import.failedTitle': 'Import failed',
-  'import.ocrHint': 'PDFs and images go through Mistral OCR…',
+  'import.ocrHint': 'PDFs and images are transcribed by Claude…',
   'import.unsupportedTitle': 'No supported files',
   'import.unsupportedMsg':
     'Pick .md, .markdown, .txt, .pdf, or images (.png, .jpg, .webp, .avif, .gif).',
@@ -1155,7 +1155,7 @@ const fr: Messages = {
   'import.completePeriod': '.',
   'import.completeNoDocs': 'Aucun document créé',
   'import.failedTitle': 'Échec de l’importation',
-  'import.ocrHint': 'PDF et images traités par OCR Mistral…',
+  'import.ocrHint': 'PDF et images transcrits par Claude…',
   'import.unsupportedTitle': 'Aucun fichier compatible',
   'import.unsupportedMsg':
     'Choisissez des .md, .markdown, .txt, .pdf ou des images (.png, .jpg, .webp, .avif, .gif).',

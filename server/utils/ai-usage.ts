@@ -1,6 +1,6 @@
 /**
  * Fire-and-forget writer for `ai_usage_logs`, shared by every provider wrapper
- * (`claude.ts` for generation, `mistral.ts` for embeddings + OCR). The admin
+ * (`claude.ts` for generation, `embeddings.ts` for embeddings). The admin
  * AI-usage panel groups on `model`, so each wrapper logs its own model id.
  */
 import { useDb } from '~/server/database/client'
