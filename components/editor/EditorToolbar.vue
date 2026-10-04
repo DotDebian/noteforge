@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import type { Editor } from '@tiptap/vue-3'
 import { useDialog } from '~/composables/useDialog'
 import { useLocale } from '~/composables/useLocale'
-import { useRealtimeTranscription } from '~/composables/useRealtimeTranscription'
 
 const dialog = useDialog()
 const { t, locale } = useLocale()
@@ -81,75 +80,6 @@ interface Props {
 const props = defineProps<Props>()
 
 const headingMenuOpen = ref(false)
-
-/* -------------------------------------------------------------------- */
-/*  Voice-to-text (Mistral voxtral-mini-transcribe-realtime-latest)     */
-/* -------------------------------------------------------------------- */
-
-const voice = useRealtimeTranscription()
-// Insertion point: captured when recording starts so the final transcript
-// lands where the user clicked the mic, not at wherever the cursor drifted
-// to while recording.
-let voiceInsertPos: number | null = null
-// Track how much of the live transcript we've already inserted so each
-// delta only adds the new text — keeps the user's cursor and selection
-// outside the worklet's growing range.
-let voiceInsertedLen = 0
-
-function clearVoiceInsertion() {
-  voiceInsertPos = null
-  voiceInsertedLen = 0
-}
-
-watch(() => voice.transcript.value, (next) => {
-  const editor = props.editor
-  if (!editor || voiceInsertPos === null) return
-  if (next.length <= voiceInsertedLen) return
-  const delta = next.slice(voiceInsertedLen)
-  if (!delta) return
-  // Insert without focusing — the worklet pushes deltas every ~1s and
-  // re-focusing on each one steals from the title input / blocks scrolling.
-  editor
-    .chain()
-    .insertContentAt(voiceInsertPos + voiceInsertedLen, delta)
-    .run()
-  voiceInsertedLen = next.length
-})
-
-async function onVoiceToggle() {
-  if (!props.editor) return
-  if (voice.isRecording.value) {
-    // Stop and keep whatever is already inserted.
-    await voice.stop()
-    clearVoiceInsertion()
-    return
-  }
-  // Idle → start. Anchor the insertion point at the current selection.
-  voiceInsertPos = props.editor.state.selection.from
-  voiceInsertedLen = 0
-  await voice.start()
-  if (voice.status.value === 'error') {
-    clearVoiceInsertion()
-    await dialog.alert({
-      title: t('editor.voice.errorMic'),
-      message: voice.error.value ?? '',
-    })
-  }
-}
-
-function onVoiceCancel() {
-  const editor = props.editor
-  if (editor && voiceInsertPos !== null && voiceInsertedLen > 0) {
-    // Roll back the text we streamed in while recording.
-    editor
-      .chain()
-      .focus()
-      .deleteRange({ from: voiceInsertPos, to: voiceInsertPos + voiceInsertedLen })
-      .run()
-  }
-  voice.cancel()
-  clearVoiceInsertion()
-}
 
 const activeHeading = computed(() => {
   const editor = props.editor
@@ -449,29 +379,6 @@ async function promptLink() {
         ✕
       </button>
     </template>
-
-    <span class="tb-sep" aria-hidden="true" />
-
-    <!-- Voice note (realtime transcription) -->
-    <button
-      type="button"
-      class="tb-rec"
-      :class="{ 'tb-rec-active': voice.isRecording.value }"
-      :aria-label="voice.isRecording.value ? t('editor.tb.voiceRecording') : t('editor.tb.voice')"
-      :aria-pressed="voice.isRecording.value"
-      :disabled="voice.status.value === 'connecting' || voice.status.value === 'requesting-permission' || voice.status.value === 'stopping'"
-      @click="onVoiceToggle"
-    >
-      <span class="tb-rec-dot" />
-    </button>
-    <button
-      v-if="voice.isRecording.value || voice.status.value === 'connecting' || voice.status.value === 'requesting-permission'"
-      type="button"
-      class="tb-rec-cancel"
-      @click="onVoiceCancel"
-    >
-      {{ t('editor.voice.cancel') }}
-    </button>
   </div>
 </template>
 
@@ -493,42 +400,5 @@ async function promptLink() {
 }
 .tb-menu-item {
   @apply block w-full px-3 py-1.5 text-left text-sm text-ink-700 transition-colors hover:bg-ink-50 dark:text-ink-200 dark:hover:bg-ink-800;
-}
-
-/* -------------------------------------------------------------------- */
-/*  Voice recorder button                                               */
-/* -------------------------------------------------------------------- */
-.tb-rec {
-  @apply inline-flex h-8 w-8 items-center justify-center rounded-full border border-ink-300 bg-transparent transition-all hover:border-ink-400 hover:bg-ink-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-ink-700 dark:hover:border-ink-600 dark:hover:bg-ink-800;
-}
-.tb-rec-dot {
-  @apply block h-3 w-3 rounded-full bg-ink-400 transition-colors;
-}
-html.dark .tb-rec-dot {
-  background: theme('colors.ink.500');
-}
-.tb-rec-active {
-  @apply border-red-500 bg-red-50 hover:border-red-600 hover:bg-red-100 dark:border-red-500 dark:bg-red-950/40 dark:hover:border-red-400 dark:hover:bg-red-950/60;
-  animation: tb-rec-glow 1.6s ease-in-out infinite;
-}
-.tb-rec-active .tb-rec-dot {
-  @apply bg-red-500 dark:bg-red-400;
-}
-@keyframes tb-rec-glow {
-  0%, 100% {
-    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55);
-  }
-  50% {
-    box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);
-  }
-}
-@media (max-width: 767px) {
-  .tb-rec {
-    @apply h-9 w-9;
-  }
-}
-
-.tb-rec-cancel {
-  @apply ml-2 inline-flex h-8 items-center px-2 text-xs uppercase tracking-wider text-ink-500 transition-colors hover:text-red-600 dark:text-ink-400 dark:hover:text-red-400;
 }
 </style>

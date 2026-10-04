@@ -149,9 +149,6 @@ importers:
       vue-router:
         specifier: ^4.4.5
         version: 4.6.4(vue@3.5.34(typescript@5.9.3))
-      ws:
-        specifier: ^8.21.0
-        version: 8.21.0
       zod:
         specifier: ^3.23.8
         version: 3.25.76
@@ -192,9 +189,6 @@ importers:
       '@types/turndown':
         specifier: ^5.0.5
         version: 5.0.6
-      '@types/ws':
-        specifier: ^8.18.1
-        version: 8.18.1
       '@vitest/coverage-v8':
         specifier: ^2.1.5
         version: 2.1.9(supports-color@10.2.2)(vitest@2.1.9(@types/node@25.9.1)(jsdom@29.1.1(@noble/hashes@2.2.0))(supports-color@10.2.2)(terser@5.47.1))
@@ -2992,9 +2986,6 @@ packages:
 
   '@types/web-bluetooth@0.0.20':
     resolution: {integrity: sha512-g9gZnnXVq7gM7v3tJCWV/qw7w+KeOlSHAhgF9RytFyifW6AF61hdT2ucrYhPq9hLs5JIryeupHV3qGk95dH9ow==}
-
-  '@types/ws@8.18.1':
-    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
   '@unhead/vue@2.1.15':
     resolution: {integrity: sha512-SSByXfEjhzPn8gXdEdgpYqpLMPSkLUH2HVE0GxZfOtNsJ0GgOHQs0g9T67ZZ1z0kTELLKdtOtYrzrbv9+ffF7g==}
@@ -9761,10 +9752,6 @@ snapshots:
   '@types/unist@3.0.3': {}
 
   '@types/web-bluetooth@0.0.20': {}
-
-  '@types/ws@8.18.1':
-    dependencies:
-      '@types/node': 25.9.1
 
   '@unhead/vue@2.1.15(vue@3.5.34(typescript@5.9.3))':
     dependencies:

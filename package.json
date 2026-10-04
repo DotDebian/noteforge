@@ -64,7 +64,6 @@
     "turndown": "^7.2.0",
     "vue": "^3.5.12",
     "vue-router": "^4.4.5",
-    "ws": "^8.21.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -80,7 +79,6 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@types/turndown": "^5.0.5",
-    "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^2.1.5",
     "drizzle-kit": "^0.28.0",
     "jsdom": "^29.1.1",

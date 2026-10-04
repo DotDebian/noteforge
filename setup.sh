@@ -3,7 +3,7 @@
 #
 # Idempotent : peut être relancé sans casser un .env existant (demande avant
 # d'écraser). Génère un NUXT_SESSION_PASSWORD de 48 octets base64 et prompte
-# pour la clé Mistral.
+# pour le token Claude et la clé Voyage.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -66,9 +66,6 @@ CLAUDE_EFFORT=medium
 
 VOYAGE_API_KEY=$voyage_key
 VOYAGE_EMBED_MODEL=voyage-4-large
-
-# Optionnel — dictée vocale uniquement.
-MISTRAL_API_KEY=
 
 NUXT_SESSION_PASSWORD=$session_pwd
 

@@ -10,7 +10,6 @@ Notes intelligentes : workspaces → dossiers récursifs → documents markdown 
 - `nuxt-auth-utils` (login/password, sessions cookie, bcrypt)
 - Claude via le Claude Agent SDK (chat, analyse, réécriture, rerank) — Sonnet 5.5, effort medium
 - Voyage AI (`voyage-4-large`) pour les embeddings
-- Mistral API pour la dictée vocale uniquement — optionnel
 - pnpm, TypeScript strict
 
 ## Démarrage rapide
@@ -82,7 +81,7 @@ Multistage `Dockerfile` (build with native toolchain → slim runtime) and `dock
 ```bash
 git clone git@github.com:DotDebian/noteforge.git
 cd noteforge
-./setup.sh                       # prépare .env (session password généré, token Claude + clé Mistral promptés) + data/
+./setup.sh                       # prépare .env (session password généré, token Claude + clé Voyage promptés) + data/
 docker compose up -d --build     # http://localhost:3000
 ```
 
