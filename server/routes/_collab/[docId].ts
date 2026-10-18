@@ -29,9 +29,11 @@ async function authorize(request: Parameters<typeof getUserSession>[0] & { url: 
   const docId = docIdFromUrl(request.url)
   if (!docId) return CLOSE_FORBIDDEN
 
-  const session = await getUserSession(request)
+  // No cookie → h3 tries to CREATE a session, which throws outside a main
+  // handler ("Cannot initialize a new session"). That's just "anonymous".
+  const session = await getUserSession(request).catch(() => null)
   const userId = session?.user?.id
-  if (!userId || typeof session.dek !== 'string') return CLOSE_UNAUTHORIZED
+  if (!session || !userId || typeof session.dek !== 'string') return CLOSE_UNAUTHORIZED
   const dek = Buffer.from(session.dek, 'base64')
   if (dek.byteLength !== 32) return CLOSE_UNAUTHORIZED
 
@@ -53,7 +55,12 @@ async function authorize(request: Parameters<typeof getUserSession>[0] & { url: 
 
 export default defineWebSocketHandler({
   async upgrade(request) {
+    // Never let the upgrade reject: crossws would leave the socket hanging.
     const result = await authorize(request as unknown as Parameters<typeof authorize>[0])
+      .catch((err: unknown) => {
+        console.error('[collab] authorize failed', err)
+        return CLOSE_FORBIDDEN
+      })
     if (typeof result === 'number') request.context[CTX_DENIED] = result
     else request.context[CTX_INFO] = result
   },
