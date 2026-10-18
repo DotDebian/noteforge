@@ -45,6 +45,7 @@ import {
   assertFolderMembership,
   assertWorkspaceMembership,
 } from './access'
+import { invalidateCollab } from './collab/rooms'
 import { decryptField, encryptField, isEncrypted } from './crypto'
 import { extractDocLinks, reconcileDocLinks } from './doc-links'
 import { decryptDocument, decryptFolder } from './encrypted-entities'
@@ -192,6 +193,9 @@ export async function moveUserDocument(
     oldKey: rekeyed ? sourceKey! : null,
     newKey: rekeyed ? targetKey! : null,
   })
+  // The Y state was encrypted under the source key (nulled in the tx); close
+  // any live room still holding it.
+  await invalidateCollab(docId)
 
   // Wiki-links pointing at the old workspace are gone (deleted above); a link
   // that happened to point INTO the destination workspace becomes valid now.
@@ -370,6 +374,7 @@ export async function moveUserFolder(
     oldKey: rekeyed ? sourceKey! : null,
     newKey: rekeyed ? targetKey! : null,
   })
+  for (const d of subtreeDocs) await invalidateCollab(d.id)
 
   for (const [docId, markdown] of plainMarkdown) {
     try {
@@ -557,7 +562,7 @@ function relocateDocumentRows(args: RelocateArgs): number {
     sqlite.prepare(
       `UPDATE documents
           SET workspace_id = ?, folder_id = ?, position = ?, updated_at = ?,
-              title = ?, markdown = ?, content_json = ?
+              title = ?, markdown = ?, content_json = ?, ydoc_state = NULL
         WHERE id = ?`,
     ).run(
       targetWorkspaceId,
@@ -629,7 +634,7 @@ function relocateFolderRows(args: RelocateFolderArgs): number {
       `SELECT title, markdown, content_json FROM documents WHERE id = ?`,
     )
     const updDoc = sqlite.prepare(
-      `UPDATE documents SET workspace_id = ?, title = ?, markdown = ?, content_json = ? WHERE id = ?`,
+      `UPDATE documents SET workspace_id = ?, title = ?, markdown = ?, content_json = ?, ydoc_state = NULL WHERE id = ?`,
     )
     for (const docId of docIds) {
       const row = selectDoc.get(docId)

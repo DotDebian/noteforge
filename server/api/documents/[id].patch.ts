@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { defineEventHandler, readValidatedBody } from 'h3'
+import { defineEventHandler, getHeader, readValidatedBody } from 'h3'
 import { assertDocumentMembership, parseIdParam } from '~/server/utils/access'
 import { updateUserDocument } from '~/server/utils/notes'
 import { requireUser } from '~/server/utils/require-user'
@@ -29,6 +29,9 @@ export default defineEventHandler(async (event) => {
   const user = await requireUser(event)
   const { workspace } = await assertDocumentMembership(user.id, id)
   const key = await getWorkspaceKeyFromWorkspace(event, workspace)
-  const document = await updateUserDocument(user.id, id, input, key)
+  // Sent by the live-collaboration leader: its markdown is derived from the
+  // room, so it must not invalidate it (see server/utils/collab/rooms.ts).
+  const fromCollab = getHeader(event, 'x-collab') === '1'
+  const document = await updateUserDocument(user.id, id, input, key, { fromCollab })
   return { document }
 })

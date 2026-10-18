@@ -98,6 +98,9 @@ export function decryptDocument<T extends Partial<Pick<Document, 'title' | 'mark
   if (row.title != null) (patch as { title: string }).title = dec(row.title, dek, { ...base, field: 'title' })
   if (row.markdown != null) (patch as { markdown: string }).markdown = dec(row.markdown, dek, { ...base, field: 'markdown' })
   if (row.contentJson != null) (patch as { contentJson: string }).contentJson = dec(row.contentJson, dek, { ...base, field: 'contentJson' })
+  // Live-collab Y state is server-internal (and large): never ship it to a
+  // REST or MCP caller. Only server/utils/collab/rooms.ts reads it.
+  if ('ydocState' in row) (patch as unknown as { ydocState: null }).ydocState = null
   return { ...row, ...patch }
 }
 

@@ -166,6 +166,12 @@ export const documents = sqliteTable(
     markdown: text('markdown').notNull().default(''),
     contentJson: text('content_json').notNull().default('{}'),
     position: integer('position').notNull().default(0),
+    // Live-collaboration state (shared workspaces only): the Yjs document as
+    // `encodeStateAsUpdate`, base64, encrypted under the workspace key. NULL
+    // means "markdown is the source of truth — reseed the room from it".
+    // Any write to `markdown` that does not come from the collab leader must
+    // null this column (see server/utils/collab/rooms.ts `invalidateCollab`).
+    ydocState: text('ydoc_state'),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .default(sql`(unixepoch())`),

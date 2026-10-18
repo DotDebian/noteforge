@@ -4,6 +4,7 @@ import { useDb } from '~/server/database/client'
 import { documents, documentVersions } from '~/server/database/schema'
 import { assertDocumentAccess, parseIdParam } from '~/server/utils/access'
 import { getDek } from '~/server/utils/dek'
+import { invalidateCollab } from '~/server/utils/collab/rooms'
 import { decryptDocument } from '~/server/utils/encrypted-entities'
 import { requireUser } from '~/server/utils/require-user'
 
@@ -66,6 +67,9 @@ export default defineEventHandler(async (event) => {
   if (!updated) {
     throw createError({ statusCode: 404, statusMessage: 'Document not found' })
   }
+
+  // A live room would otherwise overwrite the restored content.
+  await invalidateCollab(docId)
 
   return { document: decryptDocument(updated, dek) }
 })

@@ -62,6 +62,37 @@ html.dark ::selection {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Live collaboration — remote carets (@tiptap/extension-collaboration-cursor) */
+/*  The extension inlines each user's colour as border/background.             */
+/* -------------------------------------------------------------------------- */
+
+.collaboration-cursor__caret {
+  position: relative;
+  margin-left: -1px;
+  margin-right: -1px;
+  border-left: 1px solid;
+  border-right: 1px solid;
+  word-break: normal;
+  pointer-events: none;
+}
+
+.collaboration-cursor__label {
+  position: absolute;
+  top: -1.4em;
+  left: -1px;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px 3px 3px 0;
+  font-family: theme('fontFamily.sans');
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 600;
+  line-height: normal;
+  color: #fff;
+  white-space: nowrap;
+  user-select: none;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Reusable utility: small mono uppercase labels — defined as a Tailwind     */
 /*  plugin in tailwind.config.ts so `@apply label-mono` works inside Vue      */
 /*  `<style scoped>` blocks (which would otherwise be processed in isolation  */

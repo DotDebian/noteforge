@@ -68,6 +68,7 @@ import { searchChunkGroups, type SearchChunkGroup, type SearchHit } from './sear
 import { scoreTitleMatch, TITLE_MATCH_MIN_SCORE } from './title-match'
 import { applyUnifiedPatch, PatchParseError, type AppliedHunk, type ApplyPatchResult } from './patch'
 import { decryptField } from './crypto'
+import { invalidateCollab, syncCollabTitle } from './collab/rooms'
 import {
   decryptAnalysis,
   decryptDocument,
@@ -426,11 +427,18 @@ export interface UpdateDocumentInput {
  *  the most-recent existing snapshot for the doc. */
 const SNAPSHOT_WINDOW_MS = 30 * 60 * 1000
 
+export interface UpdateDocumentOptions {
+  /** The write comes from the live-collaboration leader, whose markdown is
+   *  derived from the room's Y.Doc — don't invalidate that room. */
+  fromCollab?: boolean
+}
+
 export async function updateUserDocument(
   userId: number,
   docId: number,
   input: UpdateDocumentInput,
   dek: Buffer | null = null,
+  options: UpdateDocumentOptions = {},
 ): Promise<Document> {
   const { document: doc, role } = await assertDocumentMembership(userId, docId)
   assertCanEdit(role)
@@ -569,6 +577,14 @@ export async function updateUserDocument(
     }
   }
 
+  // Live collaboration: markdown from anyone but the room's leader (MCP,
+  // chat tool-call, an old client) supersedes the Y state. A bare rename is
+  // pushed into the room instead, so the leader doesn't PATCH it back.
+  if (!options.fromCollab) {
+    if (input.markdown !== undefined) await invalidateCollab(docId)
+    else if (input.title !== undefined) syncCollabTitle(docId, input.title)
+  }
+
   return decryptDocument(updated, dek)
 }
 
@@ -690,6 +706,8 @@ export async function softDeleteUserDocument(
   if (!updated || !updated.deletedAt) {
     throw createError({ statusCode: 404, statusMessage: 'Document not found' })
   }
+  // Kick live editors out of a trashed note.
+  await invalidateCollab(docId)
   return { ok: true, deletedAt: updated.deletedAt }
 }
 

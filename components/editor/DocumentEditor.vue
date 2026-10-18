@@ -11,6 +11,8 @@ import TaskList from '@tiptap/extension-task-list'
 import TaskItem from '@tiptap/extension-task-item'
 import CharacterCount from '@tiptap/extension-character-count'
 import Image from '@tiptap/extension-image'
+import Collaboration from '@tiptap/extension-collaboration'
+import CollaborationCursor from '@tiptap/extension-collaboration-cursor'
 import { CodeBlockWithMermaid } from './extensions/code-block-mermaid'
 import { MathInline } from './extensions/math-inline'
 import { MathBlock } from './extensions/math-block'
@@ -49,6 +51,8 @@ import {
 import TransclusionMenu from './TransclusionMenu.vue'
 import { htmlToMarkdown, looksLikeMarkdown, markdownToHtml } from '~/composables/useEditorMarkdown'
 import { useDocumentSaver } from '~/composables/useDocumentSaver'
+import { useCollab, type CollabPeer } from '~/composables/useCollab'
+import { colorForUser, labelForUser } from '~/utils/collab'
 import { useChatStore } from '~/stores/chat'
 import { useTreeStore } from '~/stores/tree'
 import { useLocale, useLocalizedTimeAgo } from '~/composables/useLocale'
@@ -56,11 +60,19 @@ import { storeToRefs } from 'pinia'
 
 interface Props {
   doc: Document
+  /** Live collaboration (shared workspace, markdown note). `null` = the
+   *  classic single-writer path: every keystroke PATCHes from this tab. */
+  collab?: { canEdit: boolean } | null
 }
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), { collab: null })
 const emit = defineEmits<{
   (e: 'update:title', value: string): void
   (e: 'update:markdown', value: string): void
+  (e: 'presence', value: CollabPeer[]): void
+  /** The server invalidated the room — refetch and remount. */
+  (e: 'collab-reset'): void
+  /** The socket was refused or never synced — remount without collab. */
+  (e: 'collab-unavailable'): void
 }>()
 
 /* -------------------------------------------------------------------- */
@@ -69,7 +81,47 @@ const emit = defineEmits<{
 
 const title = ref<string>(props.doc.title)
 const docId = computed(() => props.doc.id)
-const saver = useDocumentSaver(docId, 500)
+
+/* -------------------------------------------------------------------- */
+/*  Live collaboration                                                  */
+/*                                                                      */
+/*  The Y.Doc is the live source of truth; only the leader tab (see     */
+/*  utils/collab.ts `pickLeaderClientId`) PATCHes markdown, tagged      */
+/*  `X-Collab: 1` so the server doesn't invalidate its own room.        */
+/* -------------------------------------------------------------------- */
+
+const { user: sessionUser } = useUserSession()
+const collab = (() => {
+  const u = sessionUser.value
+  if (!props.collab || !import.meta.client || !u) return null
+  return useCollab(
+    props.doc.id,
+    { id: u.id, name: labelForUser(u), color: colorForUser(u.id), canEdit: props.collab.canEdit },
+    () => emit('collab-reset'),
+  )
+})()
+const canEdit = props.collab?.canEdit ?? true
+const collabStatus = computed(() => collab?.status.value ?? null)
+
+const saver = useDocumentSaver(docId, 500, collab ? { headers: { 'X-Collab': '1' } } : {})
+let lastPersistedMarkdown = props.doc.markdown ?? ''
+let lastPersistedTitle = props.doc.title
+
+/** Leader-only, and only while connected: an offline tab's view may be
+ *  behind the room, and every offline tab would elect itself. */
+function canPersistFromRoom(): boolean {
+  return !!collab
+    && canEdit
+    && collab.isLeader.value
+    && collab.synced.value
+    && collab.status.value === 'live'
+}
+
+function persistFromRoom(markdown: string, contentJson: unknown): void {
+  if (!canPersistFromRoom() || markdown === lastPersistedMarkdown) return
+  lastPersistedMarkdown = markdown
+  saver.save({ markdown, contentJson })
+}
 const ago = useLocalizedTimeAgo(() => saver.lastSavedAt.value ?? new Date())
 
 const chatStore = useChatStore()
@@ -238,6 +290,13 @@ watch(pendingCitation, (next) => {
 })
 
 const statusLabel = computed<string>(() => {
+  if (collab) {
+    if (collabStatus.value === 'connecting') return t('doc.collab.connecting')
+    if (collabStatus.value === 'offline') return t('doc.collab.offline')
+    if (!canEdit) return t('doc.collab.readOnly')
+    // Non-leaders never save themselves; the room is what they're "saved" to.
+    if (!collab.isLeader.value) return t('doc.collab.live')
+  }
   switch (saver.status.value) {
     case 'saving':
       return t('doc.status.saving')
@@ -561,9 +620,22 @@ async function uploadAndInsertImages(files: File[]): Promise<void> {
 /* -------------------------------------------------------------------- */
 
 const editor = useEditor({
-  content: markdownToHtml(props.doc.markdown ?? ''),
+  // Collab: the content comes from the room (or our seed, see below).
+  content: collab ? '' : markdownToHtml(props.doc.markdown ?? ''),
+  editable: canEdit,
   extensions: [
+    ...(collab
+      ? [
+          Collaboration.configure({ fragment: collab.fragment }),
+          CollaborationCursor.configure({
+            provider: collab.provider,
+            user: collab.provider.awareness.getLocalState()?.user ?? {},
+          }),
+        ]
+      : []),
     StarterKit.configure({
+      // Yjs brings its own undo manager, scoped to this user's changes.
+      ...(collab ? { history: false as const } : {}),
       // StarterKit already includes: heading, bold, italic, strike, code,
       // codeBlock, blockquote, bulletList, orderedList, hardBreak,
       // horizontalRule, listItem, paragraph, history, dropcursor, gapcursor.
@@ -804,7 +876,10 @@ const editor = useEditor({
     const contentJson = editor.getJSON()
     characters.value = editor.storage.characterCount?.characters?.() ?? 0
     words.value = editor.storage.characterCount?.words?.() ?? 0
-    saver.save({ markdown, contentJson })
+    // Collab: fires for remote edits too, which is what lets the leader
+    // persist everybody's typing.
+    if (collab) persistFromRoom(markdown, contentJson)
+    else saver.save({ markdown, contentJson })
     // Surface the live markdown so panels (e.g. insights stale-indicator)
     // can react without waiting for a server round-trip.
     emit('update:markdown', markdown)
@@ -813,10 +888,80 @@ const editor = useEditor({
     characters.value = editor.storage.characterCount?.characters?.() ?? 0
     words.value = editor.storage.characterCount?.words?.() ?? 0
     // If we navigated to this doc with a queued citation, jump to it
-    // once the editor's first paint is in.
-    queueMicrotask(tryConsumeCitation)
+    // once the editor's first paint is in. Collab: the content isn't there
+    // yet — the `synced` watcher below does it.
+    if (!collab) queueMicrotask(tryConsumeCitation)
   },
 })
+
+if (collab) {
+  // Seed: the room had no state, so the server picked us to load the
+  // stored markdown. Kept out of undo history so Ctrl+Z can't empty the doc.
+  // (A viewer seeds too, locally — the server drops its updates.)
+  watch(
+    [collab.seedRequested, collab.synced, editor],
+    ([requested, synced, ed]) => {
+      if (!requested || !synced || !ed) return
+      collab.seedRequested.value = false
+      if (collab.fragment.length > 0) return
+      ed.chain()
+        .setMeta('addToHistory', false)
+        .setContent(markdownToHtml(props.doc.markdown ?? ''), false)
+        .run()
+    },
+  )
+
+  // First sync: citation jump, and the leader catches up any markdown the
+  // previous leader didn't get to persist.
+  watch(
+    [collab.synced, editor],
+    ([synced, ed]) => {
+      if (!synced || !ed) return
+      queueMicrotask(tryConsumeCitation)
+    },
+  )
+  watch(
+    () => canPersistFromRoom() && collab.fragment.length > 0,
+    (ok) => {
+      const ed = editor.value
+      if (!ok || !ed) return
+      persistFromRoom(htmlToMarkdown(ed.getHTML()), ed.getJSON())
+      const roomTitle = collab.meta.get('title')
+      if (roomTitle && roomTitle !== lastPersistedTitle) {
+        lastPersistedTitle = roomTitle
+        saver.save({ title: roomTitle })
+      }
+    },
+    { immediate: true },
+  )
+
+  // Title lives in the room's meta map. Everyone mirrors it; the leader
+  // persists it.
+  collab.meta.observe(() => {
+    const next = collab.meta.get('title')
+    if (next == null) return
+    if (next !== title.value) {
+      title.value = next
+      emit('update:title', next)
+    }
+    if (canPersistFromRoom() && next !== lastPersistedTitle) {
+      lastPersistedTitle = next
+      saver.save({ title: next })
+    }
+  })
+
+  watch(collab.peers, peers => emit('presence', peers), { immediate: true })
+
+  // Refused (not a member any more, workspace unshared…) or never synced:
+  // hand back to the parent, which remounts us on the single-writer path.
+  watch(collab.status, (s) => {
+    if (s === 'denied') emit('collab-unavailable')
+  })
+  const syncTimeout = setTimeout(() => {
+    if (!collab.synced.value) emit('collab-unavailable')
+  }, 8000)
+  onBeforeUnmount(() => clearTimeout(syncTimeout))
+}
 
 /* -------------------------------------------------------------------- */
 /*  Title autosave (separate channel — saves on blur + 500ms debounce)  */
@@ -824,7 +969,8 @@ const editor = useEditor({
 
 function onTitleInput() {
   const next = title.value.trim() || t('doc.untitled')
-  saver.save({ title: next })
+  if (collab) collab.meta.set('title', next)
+  else saver.save({ title: next })
   emit('update:title', next)
 }
 
@@ -863,7 +1009,8 @@ function maybeLiftTitle(text: string): { title: string, body: string } | null {
 
 function applyLiftedTitle(next: string): void {
   title.value = next
-  saver.save({ title: next })
+  if (collab) collab.meta.set('title', next)
+  else saver.save({ title: next })
   emit('update:title', next)
 }
 
@@ -872,6 +1019,7 @@ function onTitleBlur() {
   if (!trimmed) {
     const fallback = t('doc.untitled')
     title.value = fallback
+    if (collab) collab.meta.set('title', fallback)
     emit('update:title', fallback)
   }
 }
@@ -881,7 +1029,8 @@ function onTitleBlur() {
 watch(
   () => props.doc.id,
   (newId, oldId) => {
-    if (newId === oldId) return
+    // Collab editors are keyed by doc id in the page, so they remount.
+    if (newId === oldId || collab) return
     title.value = props.doc.title
     const html = markdownToHtml(props.doc.markdown ?? '')
     editor.value?.commands.setContent(html, false)
@@ -895,6 +1044,7 @@ onBeforeUnmount(() => {
   // Flush any pending save before tearing down.
   void saver.flush({})
   editor.value?.destroy()
+  collab?.destroy()
 })
 
 // Expose the Tiptap editor instance so siblings (e.g. <DocumentOutline />
@@ -923,6 +1073,7 @@ defineExpose({ editor })
         :placeholder="t('doc.editor.titlePlaceholder')"
         class="title-input"
         spellcheck="true"
+        :readonly="!canEdit"
         @input="onTitleInput"
         @blur="onTitleBlur"
       >

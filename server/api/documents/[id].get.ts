@@ -13,7 +13,16 @@ import { getWorkspaceKeyFromWorkspace } from '~/server/utils/workspace-key'
 export default defineEventHandler(async (event) => {
   const id = parseIdParam(event)
   const user = await requireUser(event)
-  const { workspace } = await assertDocumentMembership(user.id, id)
+  const { workspace, role } = await assertDocumentMembership(user.id, id)
   const key = await getWorkspaceKeyFromWorkspace(event, workspace)
-  return await getUserDocument(user.id, id, { includeTrashed: true }, key)
+  const result = await getUserDocument(user.id, id, { includeTrashed: true }, key)
+  // Live collaboration: markdown notes of shared workspaces only. The socket
+  // (server/routes/_collab/[docId].ts) re-checks all of this on its own.
+  const collab = {
+    enabled: workspace.encryptionMode === 'wek'
+      && result.document.type === 'markdown'
+      && result.document.deletedAt == null,
+    canEdit: role !== 'viewer',
+  }
+  return { ...result, collab }
 })

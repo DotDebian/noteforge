@@ -1,0 +1,1 @@
+ALTER TABLE `documents` ADD `ydoc_state` text;

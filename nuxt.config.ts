@@ -85,6 +85,8 @@ export default defineNuxtConfig({
     },
     experimental: {
       tasks: true,
+      // Live collaboration (`server/routes/_collab/[docId].ts`, crossws).
+      websocket: true,
     },
   },
   app: {

@@ -12,6 +12,7 @@ import { useDialog } from '~/composables/useDialog'
 import { useLocale } from '~/composables/useLocale'
 import { useDocInsightsSheet } from '~/composables/useDocInsightsSheet'
 import { useDocActionsSheet } from '~/composables/useDocActionsSheet'
+import type { CollabPeer } from '~/composables/useCollab'
 
 const route = useRoute()
 const treeStore = useTreeStore()
@@ -33,7 +34,12 @@ watch(
   { immediate: true },
 )
 
-interface DocResponse { document: Document, analysis: DocAnalysis | null }
+interface DocResponse {
+  document: Document
+  analysis: DocAnalysis | null
+  /** Live collaboration — see server/api/documents/[id].get.ts. */
+  collab?: { enabled: boolean, canEdit: boolean }
+}
 
 const { data, pending, error, refresh } = await useFetch<DocResponse>(
   () => `/api/documents/${docId.value}`,
@@ -208,10 +214,48 @@ function onSharesChanged(count: number) {
 
 // Sprint 5 / I9 — version history dialog.
 const historyOpen = ref(false)
-// Bumped on every restore so the editor remounts with the restored content.
+// Bumped on every restore (and live-session reset) so the editor remounts with the restored content.
 // The editor only resets `setContent` on a docId CHANGE — same id with new
 // markdown wouldn't repaint without this key.
 const editorVersionKey = ref(0)
+/* ---------- Live collaboration ----------
+ *
+ * Shared-workspace notes open a live session (components/editor/
+ * DocumentEditor.vue + composables/useCollab.ts). `collabFallback` drops this
+ * doc back to the single-writer path when the socket is refused or never
+ * syncs (proxy without WebSocket, membership revoked…). */
+const collabFallback = ref(false)
+watch(docId, () => { collabFallback.value = false })
+const editorCollab = computed(() => {
+  const c = data.value?.collab
+  return c?.enabled && !collabFallback.value ? { canEdit: c.canEdit } : null
+})
+const presence = ref<CollabPeer[]>([])
+watch(editorCollab, (c) => { if (!c) presence.value = [] })
+
+const collabNotice = ref<string | null>(null)
+let collabNoticeTimer: ReturnType<typeof setTimeout> | null = null
+function showCollabNotice(message: string) {
+  collabNotice.value = message
+  if (collabNoticeTimer) clearTimeout(collabNoticeTimer)
+  collabNoticeTimer = setTimeout(() => { collabNotice.value = null }, 5000)
+}
+onBeforeUnmount(() => { if (collabNoticeTimer) clearTimeout(collabNoticeTimer) })
+
+async function onCollabReset() {
+  // The room was invalidated (MCP write, version restore, move…): load the
+  // fresh markdown, then remount so the new room seeds from it.
+  await refresh()
+  editorVersionKey.value++
+  showCollabNotice(t('doc.collab.reset'))
+}
+function onCollabUnavailable() {
+  if (collabFallback.value) return
+  collabFallback.value = true
+  editorVersionKey.value++
+  showCollabNotice(t('doc.collab.unavailable'))
+}
+
 async function onRestored(restored: Document) {
   if (data.value) data.value.document = restored
   liveTitle.value = restored.title
@@ -272,6 +316,7 @@ onBeforeUnmount(endRailResize)
             <span class="crumb crumb--current">{{ liveTitle || t('doc.untitled') }}</span>
           </div>
           <div class="meta-info">
+            <PresenceAvatars v-if="presence.length > 1" :peers="presence" />
             <span v-if="updatedAt" class="meta-item">{{ t('doc.meta.editedPrefix') }} {{ editedAgo }}</span>
             <button
               v-if="doc"
@@ -396,6 +441,10 @@ onBeforeUnmount(endRailResize)
         </div>
       </header>
 
+      <Transition name="collab-notice">
+        <div v-if="collabNotice" class="collab-notice" role="status">{{ collabNotice }}</div>
+      </Transition>
+
       <div v-if="pending && !doc" class="skeleton">
         <div class="sk-title" />
         <div class="sk-line" />
@@ -424,8 +473,12 @@ onBeforeUnmount(endRailResize)
           ref="editorComp"
           :key="`${doc.id}-${editorVersionKey}`"
           :doc="doc"
+          :collab="editorCollab"
           @update:title="onTitleChange"
           @update:markdown="onMarkdownChange"
+          @presence="presence = $event"
+          @collab-reset="onCollabReset"
+          @collab-unavailable="onCollabUnavailable"
         />
         <template #fallback>
           <div class="skeleton">
@@ -523,6 +576,8 @@ onBeforeUnmount(endRailResize)
      Previously this used `overflow-auto` which made the whole article
      scroll AS WELL as the editor canvas — double scrollbar. */
   @apply flex-1 min-w-0 min-h-0 flex flex-col px-10 lg:px-14 pt-10;
+  /* Anchors the live-session notice. */
+  position: relative;
   max-width: 100%;
 }
 
@@ -685,6 +740,19 @@ html.dark .meta-star--on:hover {
 }
 
 .skeleton { @apply max-w-[680px] mx-auto pt-8; }
+
+/* Live-session notice (reset / fallback). Floats over the editor so the
+   layout doesn't jump when it appears. */
+.collab-notice {
+  @apply absolute left-1/2 top-3 z-30 -translate-x-1/2 rounded-md border border-ink-200 bg-white px-3 py-1.5 text-sm text-ink-700 shadow-sm;
+}
+html.dark .collab-notice {
+  @apply border-ink-700 bg-ink-900 text-ink-100;
+}
+.collab-notice-enter-active,
+.collab-notice-leave-active { transition: opacity 0.2s ease; }
+.collab-notice-enter-from,
+.collab-notice-leave-to { opacity: 0; }
 .sk-title {
   @apply h-8 w-2/3 rounded mb-8 bg-ink-100 dark:bg-ink-800;
   animation: shimmer 1.4s ease-in-out infinite;

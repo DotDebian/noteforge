@@ -156,6 +156,19 @@ Before drawings became documents, notes could embed a Konva whiteboard: `<div cl
 - `related/[docId].get.ts` — doc-to-doc similarity. Path A: cosine over `doc_analyses.summary_embedding` (preferred). Path B fallback: max-of-chunks cosine. On top of cosine, adds Jaccard tag overlap (× `TAG_WEIGHT = 0.15`) and a flat `LINK_BONUS = 0.1` for explicit `doc_links` in either direction.
 - `searchWorkspaceChunks` (MCP `search_notes`) shares the same hybrid pipeline and additionally runs the reranker before returning, since MCP callers don't generate text themselves.
 
+### Live collaboration (Yjs)
+
+Markdown notes in **shared (`wek`) workspaces** are edited live: Tiptap `Collaboration` + `CollaborationCursor` over a Yjs doc, synced through a crossws WebSocket inside Nitro (`nitro.experimental.websocket`). Solo workspaces and drawings keep the single-writer PATCH path untouched. `GET /api/documents/:id` returns `collab: { enabled, canEdit }`, which drives `DocumentEditor`'s `collab` prop.
+
+- [server/routes/_collab/[docId].ts](server/routes/_collab/[docId].ts) — auth at upgrade from the session cookie (DEK → workspace key via `getWorkspaceKeyForUserById`). A refusal is accepted then closed with 4401/4403 in `open` (y-websocket stops retrying on 44xx; a rejected upgrade would retry forever).
+- [server/utils/collab/rooms.ts](server/utils/collab/rooms.ts) — in-memory `Map` of rooms (prod is one process; no Redis). Viewer **writes are dropped server-side** (sync step 2 / update), their awareness is relayed. State is persisted throttled to `documents.ydoc_state` (base64 `encodeStateAsUpdate`, encrypted under the workspace key) and flushed when the last peer leaves. `decryptDocument` nulls `ydocState` so it never reaches REST/MCP.
+- [utils/collab.ts](utils/collab.ts) — shared, dependency-free: frame types (`MSG_SEED = 100`, `MSG_RESET = 101` on top of y-websocket's 0/1/3), close codes, `pickLeaderClientId`, user colour/label. Tests in `tests/collab.test.ts`.
+- **Seeding**: a room with no `ydoc_state` sends `MSG_SEED` to ONE editor, which loads the stored markdown into the empty fragment (`addToHistory: false`, so Ctrl+Z can't empty the note). Viewers get a local-only seed and a reset once an editor seeds for real.
+- **Markdown persistence stays on the PATCH pipeline** (snapshots, doc-links): only the **leader** tab (editor with the lowest Yjs clientID, computed by every client from awareness) PATCHes, tagged `X-Collab: 1`, and only while connected and synced. Title lives in the room's `meta` map and goes the same way.
+- ⚠️ **Any other write to `markdown` must call `invalidateCollab(docId)`** — it nulls `ydoc_state`, sends `MSG_RESET` and closes the room (4409); clients refetch and remount (`editorVersionKey`). Wired in `updateUserDocument` (unless `{ fromCollab: true }`), version restore, soft delete and cross-workspace moves (whose raw SQL also sets `ydoc_state = NULL`: the blob is encrypted under the old key). A bare rename goes through `syncCollabTitle` instead. Add a new markdown writer without it and the live room overwrites it.
+- Fallback: a socket refused or not synced within 8 s emits `collab-unavailable`; the page remounts that note on the single-writer path with a notice.
+- Revoking a share doesn't kick an open socket; the role is checked at connect.
+
 ### Citation jump in editor
 
 When a chat source chip is clicked, `ChatDrawer.openSource` queues `{ docId, target }` in the chat store (`target` = source's `highlight` if available, else `snippet`) and closes the drawer. The router navigates. `DocumentEditor.onCreate` (and a `watch(pendingCitation, …)` for already-mounted editors) calls `chatStore.consumePendingCitation(docId)` and runs `jumpToCitation`:

@@ -25,9 +25,15 @@ export interface UseDocumentSaverReturn {
  *
  * Use `flush()` for force-save scenarios (e.g. before navigation away).
  */
+export interface UseDocumentSaverOptions {
+  /** Extra request headers, e.g. `X-Collab: 1` from the live-session leader. */
+  headers?: Record<string, string>
+}
+
 export function useDocumentSaver(
   docId: number | Ref<number>,
   delay = 500,
+  options: UseDocumentSaverOptions = {},
 ): UseDocumentSaverReturn {
   const status = ref<SaveStatus>('idle')
   const lastSavedAt = ref<Date | null>(null)
@@ -59,6 +65,7 @@ export function useDocumentSaver(
       await $fetch<Partial<Document>>(`/api/documents/${id}`, {
         method: 'PATCH',
         body: serialized,
+        headers: options.headers,
       })
       status.value = 'saved'
       lastSavedAt.value = new Date()
