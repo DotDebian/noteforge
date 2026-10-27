@@ -6,7 +6,7 @@ import { documents } from '~/server/database/schema'
 import { assertFolderAccess, assertWorkspaceAccess } from '~/server/utils/access'
 import { activeDocsWhere } from '~/server/utils/active'
 import { decryptField, encryptField } from '~/server/utils/crypto'
-import { getDek } from '~/server/utils/dek'
+import { getWorkspaceKey } from '~/server/utils/workspace-key'
 import { ocrToMarkdown, OCR_NO_TEXT } from '~/server/utils/ocr'
 import { requireUser } from '~/server/utils/require-user'
 
@@ -40,7 +40,7 @@ export default defineEventHandler(async (event) => {
   const user = await requireUser(event)
   const input = await readValidatedBody(event, Body.parse)
   await assertWorkspaceAccess(event, input.workspaceId)
-  const dek = await getDek(event)
+  const key = await getWorkspaceKey(event, input.workspaceId)
 
   if (input.parentFolderId !== null) {
     const parent = await assertFolderAccess(event, input.parentFolderId)
@@ -99,7 +99,7 @@ export default defineEventHandler(async (event) => {
           folderCondition,
           activeDocsWhere(),
         ))
-      for (const r of rows) used.add(decryptField(r.title, dek).toLowerCase())
+      for (const r of rows) used.add(decryptField(r.title, key).toLowerCase())
       usedTitlesByFolder.set(folderId, used)
     }
     let candidate = baseTitle
@@ -169,9 +169,9 @@ export default defineEventHandler(async (event) => {
       .values({
         workspaceId: input.workspaceId,
         folderId: input.parentFolderId,
-        title: encryptField(finalTitle, dek),
-        markdown: encryptField(markdown, dek),
-        contentJson: encryptField('{}', dek),
+        title: encryptField(finalTitle, key),
+        markdown: encryptField(markdown, key),
+        contentJson: encryptField('{}', key),
         position: pos,
         createdAt: now,
         updatedAt: now,

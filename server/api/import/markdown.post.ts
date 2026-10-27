@@ -6,7 +6,7 @@ import { documents, folders, type Folder } from '~/server/database/schema'
 import { assertFolderAccess, assertWorkspaceAccess } from '~/server/utils/access'
 import { activeDocsWhere, activeFoldersWhere } from '~/server/utils/active'
 import { decryptField, encryptField } from '~/server/utils/crypto'
-import { getDek } from '~/server/utils/dek'
+import { getWorkspaceKey } from '~/server/utils/workspace-key'
 import { parseFrontmatter } from '~/server/utils/frontmatter'
 
 const MAX_FILES = 200
@@ -27,7 +27,7 @@ const Body = z.object({
 export default defineEventHandler(async (event) => {
   const input = await readValidatedBody(event, Body.parse)
   await assertWorkspaceAccess(event, input.workspaceId)
-  const dek = await getDek(event)
+  const wsKey = await getWorkspaceKey(event, input.workspaceId)
 
   if (input.parentFolderId !== null) {
     const parent = await assertFolderAccess(event, input.parentFolderId)
@@ -83,11 +83,11 @@ export default defineEventHandler(async (event) => {
       ))
 
     // Names on disk are encrypted; decrypt each before name-comparison.
-    const match = existing.find(f => decryptField(f.name, dek).toLowerCase() === name.toLowerCase())
+    const match = existing.find(f => decryptField(f.name, wsKey).toLowerCase() === name.toLowerCase())
     if (match) {
       // Surface plaintext on the cached row so callers can read it without
       // re-decrypting.
-      const decrypted: Folder = { ...match, name: decryptField(match.name, dek) }
+      const decrypted: Folder = { ...match, name: decryptField(match.name, wsKey) }
       folderCache.set(key, decrypted)
       return decrypted
     }
@@ -100,7 +100,7 @@ export default defineEventHandler(async (event) => {
       .values({
         workspaceId: input.workspaceId,
         parentId,
-        name: encryptField(name, dek),
+        name: encryptField(name, wsKey),
         position: maxPos + 1024,
       })
       .returning()
@@ -134,7 +134,7 @@ export default defineEventHandler(async (event) => {
           folderCondition,
           activeDocsWhere(),
         ))
-      for (const r of rows) used.add(decryptField(r.title, dek).toLowerCase())
+      for (const r of rows) used.add(decryptField(r.title, wsKey).toLowerCase())
       usedTitlesByFolder.set(folderId, used)
     }
 
@@ -198,9 +198,9 @@ export default defineEventHandler(async (event) => {
       .values({
         workspaceId: input.workspaceId,
         folderId: currentParent,
-        title: encryptField(finalTitle, dek),
-        markdown: encryptField(parsed.body, dek),
-        contentJson: encryptField('{}', dek),
+        title: encryptField(finalTitle, wsKey),
+        markdown: encryptField(parsed.body, wsKey),
+        contentJson: encryptField('{}', wsKey),
         position: pos,
         createdAt: now,
         updatedAt: now,
