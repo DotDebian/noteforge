@@ -1,4 +1,4 @@
-import { Marked, marked, type RendererExtension, type TokenizerExtension, type Tokens } from 'marked'
+import { Marked, marked, Renderer, type RendererExtension, type TokenizerExtension, type Tokens } from 'marked'
 import markedFootnote from 'marked-footnote'
 import TurndownService from 'turndown'
 
@@ -170,7 +170,7 @@ const calloutExtension: TokenizerExtension & RendererExtension = {
     // body are intentionally not supported — the body still gets every
     // other extension (math, transclusion, nested callouts).
     const bodyHtml = body.length > 0
-      ? (getCalloutMarked().parse(body, { async: false, breaks: false, gfm: true }) as string)
+      ? (getCalloutMarked().parse(body, { async: false, breaks: false, gfm: true, renderer: new EditorRenderer() }) as string)
       : '<p></p>'
     const token: CalloutToken = {
       type: 'callout',
@@ -234,6 +234,62 @@ const transclusionExtension: TokenizerExtension & RendererExtension = {
 }
 
 /* -------------------------------------------------------------------- */
+/*  Task lists (`- [ ]` / `- [x]`)                                      */
+/*                                                                       */
+/*  marked's stock renderer emits `<li><input type="checkbox" disabled>` */
+/*  inside a plain `<ul>`. Tiptap's TaskList / TaskItem only parse       */
+/*  `<ul data-type="taskList">` / `<li data-type="taskItem"              */
+/*  data-checked>`, so the stock shape loaded as an ordinary bullet list */
+/*  and the next autosave wrote the boxes out of the markdown for good.  */
+/*  This renderer emits the same shape as TaskItem's own `renderHTML`    */
+/*  (label + content div), which Tiptap parses back and which the        */
+/*  `.ProseMirror ul[data-type='taskList']` CSS lays out when the HTML   */
+/*  is shown as-is (transclusion preview).                               */
+/*                                                                       */
+/*  It is passed per `parse()` call rather than registered with          */
+/*  `marked.use`: the `marked` singleton is shared with the chat and     */
+/*  export renderers, which must keep the stock checkbox markup.         */
+/*                                                                       */
+/*  GFM lets task and plain items share one list; a Tiptap taskList only */
+/*  holds taskItems. A mixed list is therefore split into consecutive    */
+/*  runs, each rendered as its own list. Ordered lists keep marked's     */
+/*  default rendering (there is no ordered task list in the schema).     */
+/* -------------------------------------------------------------------- */
+
+class EditorRenderer extends Renderer {
+  override list(token: Tokens.List): string {
+    if (token.ordered || !token.items.some(item => item.task)) return super.list(token)
+    let out = ''
+    let run: Tokens.ListItem[] = []
+    let runIsTask = false
+    const flush = (): void => {
+      if (run.length === 0) return
+      const body = run.map(item => this.editorListItem(item)).join('')
+      out += runIsTask
+        ? `<ul data-type="taskList">\n${body}</ul>\n`
+        : `<ul>\n${body}</ul>\n`
+      run = []
+    }
+    for (const item of token.items) {
+      if (item.task !== runIsTask) flush()
+      runIsTask = item.task
+      run.push(item)
+    }
+    flush()
+    return out
+  }
+
+  private editorListItem(item: Tokens.ListItem): string {
+    const inner = this.parser.parse(item.tokens, !!item.loose)
+    if (!item.task) return `<li>${inner}</li>\n`
+    const checked = !!item.checked
+    return `<li data-type="taskItem" data-checked="${checked ? 'true' : 'false'}">`
+      + `<label><input type="checkbox" disabled${checked ? ' checked="checked"' : ''}><span></span></label>`
+      + `<div>${inner}</div></li>\n`
+  }
+}
+
+/* -------------------------------------------------------------------- */
 /*  marked instance                                                     */
 /* -------------------------------------------------------------------- */
 
@@ -292,6 +348,63 @@ function getCalloutMarked(): Marked {
  */
 let turndownInstance: TurndownService | null = null
 
+/**
+ * The element holding a list item's blocks. A Tiptap task item nests them
+ * in a <div> next to the checkbox <label>; every other item holds them
+ * directly.
+ */
+function listItemBlocks(li: HTMLElement): HTMLElement[] {
+  let holder: HTMLElement = li
+  if (li.getAttribute('data-type') === 'taskItem') {
+    const div = (Array.from(li.children) as HTMLElement[]).find(c => c.nodeName === 'DIV')
+    if (div) holder = div
+  }
+  return Array.from(holder.children) as HTMLElement[]
+}
+
+/**
+ * Tight = at most one paragraph, optionally followed by nested lists. An
+ * item with no element child (bare inline text) is tight too.
+ */
+function isTightListItem(li: HTMLElement): boolean {
+  let paragraphs = 0
+  for (const child of listItemBlocks(li)) {
+    if (child.nodeName === 'P') {
+      paragraphs += 1
+      if (paragraphs > 1) return false
+    }
+    else if (child.nodeName === 'UL' || child.nodeName === 'OL') {
+      continue
+    }
+    else if (BLOCK_IN_LIST_ITEM.has(child.nodeName)) {
+      return false
+    }
+  }
+  return true
+}
+
+const BLOCK_IN_LIST_ITEM = new Set([
+  'PRE', 'BLOCKQUOTE', 'TABLE', 'DIV', 'DETAILS', 'HR', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'SECTION',
+])
+
+function isTightList(list: HTMLElement): boolean {
+  return (Array.from(list.children) as HTMLElement[])
+    .filter(c => c.nodeName === 'LI')
+    .every(isTightListItem)
+}
+
+/**
+ * Trim an item's converted content and indent its continuation lines under
+ * the marker. In a tight item the paragraph and its nested list are joined
+ * by a single newline; blank lines are left empty instead of padded.
+ */
+function listItemBody(content: string, tight: boolean, indent: number): string {
+  let body = content.replace(/^\n+/, '').replace(/\n+$/, '')
+  if (tight) body = body.replace(/\n{2,}/, '\n')
+  const pad = ' '.repeat(indent)
+  return body.replace(/\n(?!\n|$)/g, `\n${pad}`)
+}
+
 function getTurndown(): TurndownService {
   if (turndownInstance) return turndownInstance
 
@@ -323,6 +436,29 @@ function getTurndown(): TurndownService {
     },
   })
 
+  // Tiptap wraps every list item's text in a <p>, and Turndown's stock
+  // `listItem` rule then writes each item as `-   text` followed by a
+  // whitespace-only line: a tight list came back loose after one save.
+  // This rule writes `- text` / `1. text`, and keeps a list tight unless
+  // one of its items really holds several blocks. Registered BEFORE the
+  // task / footnote item rules: Turndown gives later rules precedence.
+  td.addRule('listItem', {
+    filter: 'li',
+    replacement: (content, node, options) => {
+      const li = node as HTMLElement
+      const parent = li.parentNode as HTMLElement | null
+      let prefix = `${options.bulletListMarker} `
+      if (parent && parent.nodeName === 'OL') {
+        const start = Number(parent.getAttribute('start') ?? '1')
+        const index = Array.prototype.indexOf.call(parent.children, li) as number
+        prefix = `${(Number.isFinite(start) ? start : 1) + index}. `
+      }
+      const body = listItemBody(content, isTightListItem(li), prefix.length)
+      if (!li.nextElementSibling) return prefix + body
+      return prefix + body + (parent && isTightList(parent) ? '\n' : '\n\n')
+    },
+  })
+
   // Tiptap renders task lists as <ul data-type="taskList"> with
   // <li data-type="taskItem" data-checked="true|false">. Convert those
   // to GitHub-flavoured `- [ ] item` / `- [x] item` markdown.
@@ -332,11 +468,11 @@ function getTurndown(): TurndownService {
     replacement: (content, node) => {
       const checked = (node as HTMLElement).getAttribute('data-checked') === 'true'
       const box = checked ? '[x]' : '[ ]'
-      const text = content
-        .replace(/^\n+/, '')
-        .replace(/\n+$/, '')
-        .replace(/\n/g, '\n  ')
-      return `- ${box} ${text}\n`
+      const li = node as HTMLElement
+      const parent = li.parentNode as HTMLElement | null
+      const text = listItemBody(content, isTightListItem(li), 2)
+      if (!li.nextElementSibling) return `- ${box} ${text}`
+      return `- ${box} ${text}${parent && isTightList(parent) ? '\n' : '\n\n'}`
     },
   })
 
@@ -345,7 +481,13 @@ function getTurndown(): TurndownService {
   td.addRule('taskList', {
     filter: (node) =>
       node.nodeName === 'UL' && (node as HTMLElement).getAttribute('data-type') === 'taskList',
-    replacement: (content) => `\n${content}\n`,
+    replacement: (content, node) => {
+      // Nested under an item: one newline, so it stays attached to the
+      // item's text. Top level: a block of its own.
+      const parent = node.parentNode as HTMLElement | null
+      const nested = parent !== null && parent.closest('li') !== null
+      return nested ? `\n${content}` : `\n\n${content}\n\n`
+    },
   })
 
   // Strikethrough (StarterKit's `strike` extension renders as <s>).
@@ -717,7 +859,7 @@ export function markdownToHtml(md: string): string {
   ensureMarked()
   // marked.parse can return a Promise when async extensions are registered;
   // we don't use any, so we cast to string.
-  return marked.parse(md, { async: false, breaks: false, gfm: true }) as string
+  return marked.parse(md, { async: false, breaks: false, gfm: true, renderer: new EditorRenderer() }) as string
 }
 
 /**

@@ -27,8 +27,8 @@ Markdown shortcuts natifs :
 - \`- \` ou \`* \` → liste à puces, \`1. \` → liste numérotée
 - \`[ ] \` → tâche, \`[x] \` → tâche cochée
 - \`> \` → citation
-- \`\\\`\\\`\\\`\` → bloc de code
-- \`**gras**\`, \`*italique*\`, \`~~barré~~\`, \`\\\`code en ligne\\\`\`
+- \`\` \`\`\` \`\` → bloc de code
+- \`**gras**\`, \`*italique*\`, \`~~barré~~\`, \`\` \`code en ligne\` \`\`
 
 Sélectionne du texte pour faire apparaître la **bubble menu** (gras, italique, lien, code…).
 
