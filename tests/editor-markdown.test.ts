@@ -24,6 +24,30 @@ describe('markdownToHtml', () => {
   it('returns empty string for empty input', () => {
     expect(markdownToHtml('')).toBe('')
   })
+
+  it('renders GFM task items in the shape Tiptap parses', () => {
+    const html = markdownToHtml('- [x] done\n- [ ] todo\n')
+    expect(html).toContain('<ul data-type="taskList">')
+    expect(html).toContain('<li data-type="taskItem" data-checked="true">')
+    expect(html).toContain('<li data-type="taskItem" data-checked="false">')
+    // The box is carried by data-checked, never left in the item text.
+    expect(html).not.toContain('[x]')
+    expect(html).not.toContain('[ ]')
+  })
+
+  it('nests task lists and splits a list mixing task and plain items', () => {
+    const nested = markdownToHtml('- [ ] parent\n  - [x] child\n')
+    expect(nested.match(/data-type="taskList"/g)).toHaveLength(2)
+
+    const mixed = markdownToHtml('- [ ] task\n- plain\n')
+    expect(mixed).toContain('<ul data-type="taskList">')
+    expect(mixed).toMatch(/<ul>\n<li>plain<\/li>/)
+  })
+
+  it('leaves plain and ordered lists on the stock rendering', () => {
+    expect(markdownToHtml('- a\n- b\n')).not.toContain('data-type')
+    expect(markdownToHtml('1. [ ] a\n')).not.toContain('data-type')
+  })
 })
 
 describe('htmlToMarkdown', () => {
@@ -49,6 +73,21 @@ describe('htmlToMarkdown', () => {
     const md = htmlToMarkdown(html)
     expect(md).toMatch(/-\s\[ \]\s+todo/)
     expect(md).toMatch(/-\s\[x\]\s+done/)
+  })
+
+  it('writes tight lists without padding or whitespace-only lines', () => {
+    // Tiptap wraps every item's text in a <p>.
+    const md = htmlToMarkdown('<ul><li><p>one</p></li><li><p>two</p><ol><li><p>a</p></li><li><p>b</p></li></ol></li></ul>')
+    expect(md).toBe('- one\n- two\n  1. a\n  2. b')
+  })
+
+  it('keeps a list loose when an item holds several blocks', () => {
+    const md = htmlToMarkdown('<ul><li><p>one</p><p>more</p></li><li><p>two</p></li></ul>')
+    expect(md).toBe('- one\n\n  more\n\n- two')
+  })
+
+  it('honours the start number of an ordered list', () => {
+    expect(htmlToMarkdown('<ol start="3"><li><p>c</p></li><li><p>d</p></li></ol>')).toBe('3. c\n4. d')
   })
 
   it('converts a link back to markdown', () => {
